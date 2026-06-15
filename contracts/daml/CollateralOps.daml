@@ -1,0 +1,229 @@
+module CollateralOps where
+
+import Daml.Script
+
+data CallStatus
+  = CallOpen
+  | OfferPosted
+  | CollateralLocked
+  | PledgeActive
+  | Released
+  | Seized
+  deriving (Eq, Show)
+
+template TreasuryPosition
+  with
+    investor : Party
+    custodian : Party
+    auditor : Party
+    cusip : Text
+    faceValue : Decimal
+    marketValue : Decimal
+    haircutPct : Decimal
+  where
+    signatory investor, custodian
+    observer auditor
+    ensure faceValue > 0.0 && marketValue > 0.0
+
+template MarginCall
+  with
+    securedParty : Party
+    investor : Party
+    auditor : Party
+    requiredValue : Decimal
+    currency : Text
+    reason : Text
+    dueDate : Time
+    status : CallStatus
+  where
+    signatory securedParty
+    observer investor, auditor
+    ensure requiredValue > 0.0
+
+    choice OfferCollateral : ContractId CollateralOffer
+      with
+        positionCid : ContractId TreasuryPosition
+        custodian : Party
+        pledgedValue : Decimal
+        haircutPct : Decimal
+      controller investor
+      do
+        assertMsg "call must be open" (status == CallOpen)
+        position <- fetch positionCid
+        assertMsg "position belongs to investor" (position.investor == investor)
+        assertMsg "custodian mismatch" (position.custodian == custodian)
+        assertMsg "pledged value too small" (pledgedValue >= requiredValue)
+        create CollateralOffer with
+          callId = self
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          pledgedValue
+          haircutPct
+          currency
+
+template CollateralOffer
+  with
+    callId : ContractId MarginCall
+    securedParty : Party
+    investor : Party
+    custodian : Party
+    auditor : Party
+    positionCid : ContractId TreasuryPosition
+    pledgedValue : Decimal
+    haircutPct : Decimal
+    currency : Text
+  where
+    signatory investor
+    observer securedParty, custodian, auditor
+    ensure pledgedValue > 0.0
+
+    choice LockByCustodian : ContractId LockedCollateral
+      controller custodian
+      do
+        position <- fetch positionCid
+        assertMsg "custodian controls position" (position.custodian == custodian)
+        create LockedCollateral with
+          callId
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          lockedValue = pledgedValue
+          haircutPct
+          currency
+
+template LockedCollateral
+  with
+    callId : ContractId MarginCall
+    securedParty : Party
+    investor : Party
+    custodian : Party
+    auditor : Party
+    positionCid : ContractId TreasuryPosition
+    lockedValue : Decimal
+    haircutPct : Decimal
+    currency : Text
+  where
+    signatory custodian
+    observer investor, securedParty, auditor
+    ensure lockedValue > 0.0
+
+    choice AcceptPledge : ContractId ActivePledge
+      controller securedParty
+      do
+        create ActivePledge with
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          pledgedValue = lockedValue
+          haircutPct
+          currency
+          terminalStatus = PledgeActive
+
+template ActivePledge
+  with
+    securedParty : Party
+    investor : Party
+    custodian : Party
+    auditor : Party
+    positionCid : ContractId TreasuryPosition
+    pledgedValue : Decimal
+    haircutPct : Decimal
+    currency : Text
+    terminalStatus : CallStatus
+  where
+    signatory securedParty
+    observer investor, custodian, auditor
+    ensure pledgedValue > 0.0
+
+    choice ReleaseCollateral : ContractId PledgeCloseout
+      controller securedParty
+      do
+        assertMsg "pledge must be active" (terminalStatus == PledgeActive)
+        create PledgeCloseout with
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          finalStatus = Released
+          summary = "Collateral released after exposure normalized."
+
+    choice SeizeCollateral : ContractId PledgeCloseout
+      controller securedParty
+      do
+        assertMsg "pledge must be active" (terminalStatus == PledgeActive)
+        create PledgeCloseout with
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          finalStatus = Seized
+          summary = "Collateral seized after cure window expired."
+
+template PledgeCloseout
+  with
+    securedParty : Party
+    investor : Party
+    custodian : Party
+    auditor : Party
+    positionCid : ContractId TreasuryPosition
+    finalStatus : CallStatus
+    summary : Text
+  where
+    signatory securedParty
+    observer investor, custodian, auditor
+
+workflowHappyPath : Script ()
+workflowHappyPath = script do
+  investor <- allocatePartyWithHint "AtlasFund" (PartyIdHint "AtlasFund")
+  securedParty <- allocatePartyWithHint "NorthBank" (PartyIdHint "NorthBank")
+  custodian <- allocatePartyWithHint "ClearVault" (PartyIdHint "ClearVault")
+  auditor <- allocatePartyWithHint "RegSight" (PartyIdHint "RegSight")
+  dueDate <- getTime
+
+  position <- submitMulti [investor, custodian] [] do
+    createCmd TreasuryPosition with
+      investor
+      custodian
+      auditor
+      cusip = "91282CJC6"
+      faceValue = 5000000.0
+      marketValue = 4965000.0
+      haircutPct = 2.0
+
+  call <- submit securedParty do
+    createCmd MarginCall with
+      securedParty
+      investor
+      auditor
+      requiredValue = 4750000.0
+      currency = "USD"
+      reason = "Intraday repo exposure breach"
+      dueDate
+      status = CallOpen
+
+  offer <- submit investor do
+    exerciseCmd call OfferCollateral with
+      positionCid = position
+      custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  locked <- submit custodian do
+    exerciseCmd offer LockByCustodian
+
+  pledge <- submit securedParty do
+    exerciseCmd locked AcceptPledge
+
+  _closeout <- submit securedParty do
+    exerciseCmd pledge ReleaseCollateral
+
+  pure ()

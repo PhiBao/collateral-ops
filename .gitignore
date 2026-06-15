@@ -1,0 +1,14 @@
+.next/
+node_modules/
+coverage/
+dist/
+log/
+*.log
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+contracts/.daml/
+contracts/log/
+*.dar
+.DS_Store
