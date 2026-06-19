@@ -1,13 +1,14 @@
-# CollateralOps Terminal
+# CollateralOps Command Center
 
-CollateralOps Terminal is a Canton-native MVP for the Encode Build on Canton Hackathon. It models a private institutional margin-call workflow where an investor pledges tokenized U.S. Treasury collateral, a custodian locks it, a secured party accepts it, and an auditor sees the required evidence without global state leakage.
+CollateralOps Command Center is a Canton-native MVP for the Encode Build on Canton Hackathon. It is a private collateral mobility terminal for institutional tokenized Treasury workflows: an investor receives a repo margin call, the app recommends eligible UST collateral, a custodian locks the asset, a secured party accepts the pledge, and an auditor sees restricted evidence without global state leakage.
 
 ## Why This Belongs On Canton
 
 - Multi-party workflow: investor, secured party, custodian, and auditor each have distinct authority.
 - Privacy: each party sees the contracts it is entitled to see, not a public global order book.
-- Atomicity: offer, lock, accept, release, and seize are explicit state transitions.
-- Institutional relevance: margin calls, collateral mobility, tokenized assets, and audit trails are real operational problems.
+- Atomicity: offer, lock, accept, release, and default closeout are explicit state transitions.
+- Institutional relevance: collateral mobility, tokenized Treasuries, margin calls, and audit trails are real operational problems.
+- Product fit: Canton turns private multi-party settlement into an operator workflow rather than exposing a generic dashboard.
 
 ## Run The Web App
 
@@ -53,22 +54,11 @@ Then run the proof:
 CANTON_JSON_API_URL=http://localhost:7575 ./scripts/canton-json-proof.sh
 ```
 
-## Demo Script Under 3 Minutes
+To prove the default/seizure path instead of release:
 
-1. Show the terminal in `investor` view: UST inventory and open private margin call.
-2. Click `offer`: AtlasFund pledges tokenized UST collateral.
-3. Switch to `custodian`: ClearVault sees the offer and locks collateral.
-4. Switch to `securedParty`: NorthBank accepts the pledge and cures the call.
-5. Switch to `auditor`: RegSight sees the evidence trail, not an unrestricted global ledger.
-6. Close with the Daml model and Canton proof commands.
-
-## Submission Checklist
-
-- Public repository
-- Live product link
-- Presentation deck
-- 3-minute pitch/demo video
-- README proof path with local Canton commands
+```bash
+CLOSEOUT_ACTION=default CANTON_JSON_API_URL=http://localhost:7575 ./scripts/canton-json-proof.sh
+```
 
 ## Environment
 

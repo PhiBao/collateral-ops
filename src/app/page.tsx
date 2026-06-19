@@ -1,4 +1,4 @@
-import { CheckCircle2, Eye, LockKeyhole, Terminal } from "lucide-react";
+import { Activity, CheckCircle2, Eye, ListChecks, LockKeyhole, ShieldCheck, Terminal, TriangleAlert } from "lucide-react";
 import { checkCantonHealth, getSnapshot } from "@/lib/canton-client";
 import { usd, shortTime } from "@/lib/format";
 import type { ContractKind, PartyRole, WorkflowContract, WorkflowSnapshot } from "@/lib/types";
@@ -28,8 +28,8 @@ const roleCopy: Record<PartyRole, { name: string; description: string }> = {
 const stageCopy: Record<string, { label: string; summary: string; next: string }> = {
   "call-open": {
     label: "Margin call open",
-    summary: "NorthBank has raised a private collateral requirement against AtlasFund.",
-    next: "Investor posts tokenized UST collateral.",
+    summary: "NorthBank raised a private repo margin requirement against AtlasFund after an intraday UST move.",
+    next: "Review the deterministic collateral recommendation and submit the investor offer.",
   },
   "offer-posted": {
     label: "Collateral offered",
@@ -44,7 +44,7 @@ const stageCopy: Record<string, { label: string; summary: string; next: string }
   "pledge-active": {
     label: "Pledge active",
     summary: "The collateral pledge is live and visible only to the parties allowed by the Daml model.",
-    next: "Secured party releases collateral when exposure normalizes, or seizes after default.",
+    next: "Resolve the exposure by release, or prove the default closeout path.",
   },
   released: {
     label: "Collateral released",
@@ -121,8 +121,8 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
         <div className="brand">
           <Terminal size={18} />
           <div>
-            <strong>CollateralOps Terminal</strong>
-            <span>private margin call + tokenized Treasury pledge workflow</span>
+            <strong>CollateralOps Command Center</strong>
+            <span>private collateral mobility terminal for tokenized Treasuries</span>
           </div>
         </div>
         <div className="status-strip">
@@ -136,7 +136,7 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
       <section className="workspace">
         <aside className="rail">
           <div className="rail-section">
-            <span className="rail-title">1. Choose Party View</span>
+            <span className="rail-title">Party View</span>
             {roles.map((role) => (
               <a className={role === activeParty ? "role active" : "role"} href={`/?party=${role}`} key={role}>
                 <span>{roleCopy[role].name}</span>
@@ -147,7 +147,7 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
           </div>
 
           <div className="rail-section">
-            <span className="rail-title">2. What This Party Can See</span>
+            <span className="rail-title">Visible Contracts</span>
             {Object.entries(snapshot.visibility).map(([kind, visible]) => (
               <div className="visibility-row" key={kind}>
                 <span>{kind}</span>
@@ -158,7 +158,7 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
         </aside>
 
         <section className="main-grid">
-          <Panel title="Current Canton State" eyebrow="what is happening now" wide>
+          <Panel title="Current Canton State" eyebrow="operator briefing" variant="state">
             <div className="explainer">
               <div>
                 <span className="step-label">Current step</span>
@@ -172,17 +172,17 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
             </div>
             <div className="mini-guide">
               <GuideItem icon={<LockKeyhole size={16} />} title="Private contracts" text="Each tab queries the same Canton workflow through a different party." />
-              <GuideItem icon={<Eye size={16} />} title="Visibility changes" text="Hidden rows mean this party is not entitled to see that contract." />
-              <GuideItem icon={<CheckCircle2 size={16} />} title="Buttons submit commands" text="Actions below the graph are real JSON API submissions to the sandbox." />
+              <GuideItem icon={<ListChecks size={16} />} title="Deterministic selection" text="Eligible UST collateral is ranked by post-haircut coverage." />
+              <GuideItem icon={<ShieldCheck size={16} />} title="Auditable commands" text="Buttons submit JSON API commands and expose offsets for proof." />
             </div>
           </Panel>
 
-          <Panel title="3. Submit Next Canton Command" eyebrow="guided workflow">
+          <Panel title="Submit Next Canton Command" eyebrow="guided workflow" variant="command">
             <WorkflowGraph stage={snapshot.stage} started={!isFreshStart} />
             <WorkflowControls actions={snapshot.nextActions} activeParty={activeParty} stage={snapshot.stage} />
           </Panel>
 
-          <Panel title="Margin Call Blotter" eyebrow="secured exposure">
+          <Panel title="Margin Call Blotter" eyebrow="secured exposure" variant="call">
             {contractsOf(snapshot.contracts, "MarginCall").length === 0 ? (
               <EmptyState text={`${roleCopy[activeParty].name} cannot currently see the private MarginCall contract.`} />
             ) : contractsOf(snapshot.contracts, "MarginCall").map((contract) => (
@@ -193,19 +193,39 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
                 </div>
                 <div className="metric-row">
                   <Metric label="Required" value={usd(contract.requiredValue)} />
+                  <Metric label="Exposure" value={usd(contract.counterpartyExposure)} />
+                  <Metric label="Min haircut" value={`${contract.minimumHaircutPct}%`} />
                   <Metric label="Due" value={shortTime(contract.dueDate)} />
-                  <Metric label="Status" value={contract.status} />
                 </div>
               </div>
             ))}
           </Panel>
 
-          <Panel title="Tokenized UST Inventory" eyebrow="investor + custodian">
+          <Panel title="Collateral Recommendation" eyebrow="optimizer" variant="recommendation">
+            {snapshot.recommendations.length === 0 ? (
+              <EmptyState text={`${roleCopy[activeParty].name} cannot currently see enough call and inventory data for a recommendation.`} />
+            ) : snapshot.recommendations.map((recommendation) => (
+              <article className="recommendation" key={recommendation.positionId}>
+                <div className="recommendation-top">
+                  <span>Rank {recommendation.rank}</span>
+                  <strong>{recommendation.cusip}</strong>
+                </div>
+                <p>{recommendation.rationale}</p>
+                <div className="metric-row two">
+                  <Metric label="Pledge amount" value={usd(recommendation.pledgeAmount)} />
+                  <Metric label="Coverage" value={`${Math.round(recommendation.coverageRatio * 100)}%`} />
+                </div>
+              </article>
+            ))}
+          </Panel>
+
+          <Panel title="Tokenized UST Inventory" eyebrow="investor and custodian" variant="inventory">
             <div className="table">
               <div className="table-head">
                 <span>CUSIP</span>
+                <span>Issuer</span>
                 <span>Market Value</span>
-                <span>Haircut</span>
+                <span>Post-Haircut</span>
                 <span>State</span>
               </div>
               {contractsOf(snapshot.contracts, "TreasuryPosition").length === 0 ? (
@@ -213,15 +233,22 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
               ) : contractsOf(snapshot.contracts, "TreasuryPosition").map((contract) => (
                 <div className="table-row" key={contract.id}>
                   <span>{contract.cusip}</span>
+                  <span>{contract.issuer}</span>
                   <span>{usd(contract.marketValue)}</span>
-                  <span>{contract.haircutPct}%</span>
+                  <span>{usd(contract.postHaircutValue)}</span>
                   <span className="state">{contract.encumbrance}</span>
                 </div>
               ))}
             </div>
+            {contractsOf(snapshot.contracts, "TreasuryPosition").map((contract) => (
+              <div className="risk-note" key={`${contract.id}-risk`}>
+                <TriangleAlert size={14} />
+                <span>{contract.liquidityTier} · matures {contract.maturityDate} · {contract.riskNotes}</span>
+              </div>
+            ))}
           </Panel>
 
-          <Panel title="Audit Evidence Feed" eyebrow="restricted observer trail">
+          <Panel title="Audit Evidence Feed" eyebrow="restricted observer trail" variant="evidence">
             <div className="feed">
               {snapshot.receipts.length === 0 ? (
                 <EmptyState text="No audit receipt is visible to this party yet." />
@@ -235,7 +262,23 @@ CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
             </div>
           </Panel>
 
-          <Panel title="Active Contracts" eyebrow="party-scoped ledger view" wide>
+          <Panel title="Canton Proof Drawer" eyebrow="json api evidence" variant="proof">
+            <div className="proof-grid">
+              <Metric label="Offset" value={snapshot.proof.activeAtOffset ?? "not bootstrapped"} />
+              <Metric label="Visible contracts" value={String(snapshot.proof.visibleContractCount)} />
+            </div>
+            <div className="proof-query">
+              <Activity size={15} />
+              <span>{snapshot.proof.partyScopedQuery}</span>
+            </div>
+            <div className="template-list">
+              {snapshot.proof.visibleTemplateIds.length === 0 ? (
+                <span>No visible Canton templates at this offset.</span>
+              ) : snapshot.proof.visibleTemplateIds.map((templateId) => <code key={templateId}>{templateId}</code>)}
+            </div>
+          </Panel>
+
+          <Panel title="Active Contracts" eyebrow="party-scoped ledger view" variant="contracts" wide>
             <div className="contract-grid">
               {snapshot.contracts.length === 0 ? (
                 <EmptyState text="This party has no visible active contracts at the current ledger offset." />
@@ -269,16 +312,18 @@ function Panel({
   eyebrow,
   children,
   wide = false,
+  variant,
 }: {
   title: string;
-  eyebrow: string;
+  eyebrow?: string;
   children: React.ReactNode;
   wide?: boolean;
+  variant?: string;
 }) {
   return (
-    <section className={wide ? "panel wide" : "panel"}>
+    <section className={["panel", wide ? "wide" : "", variant ? `${variant}-panel` : ""].filter(Boolean).join(" ")}>
       <div className="panel-title">
-        <span>{eyebrow}</span>
+        {eyebrow ? <span>{eyebrow}</span> : null}
         <h2>{title}</h2>
       </div>
       {children}
@@ -315,9 +360,11 @@ function WorkflowGraph({ stage, started }: { stage: string; started: boolean }) 
     ["collateral-locked", "Custody Lock"],
     ["pledge-active", "Accepted Pledge"],
     ["released", "Release"],
+    ["seized", "Default"],
   ];
 
-  const activeIndex = started ? Math.max(0, nodes.findIndex(([key]) => key === stage)) : -1;
+  const currentIndex = nodes.findIndex(([key]) => key === stage);
+  const activeIndex = started ? Math.max(0, currentIndex === -1 ? 4 : currentIndex) : -1;
 
   return (
     <div className="flow">

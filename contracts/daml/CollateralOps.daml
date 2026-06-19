@@ -11,15 +11,29 @@ data CallStatus
   | Seized
   deriving (Eq, Show)
 
+data WorkflowSetup = WorkflowSetup
+  with
+    investor : Party
+    securedParty : Party
+    custodian : Party
+    auditor : Party
+    position : ContractId TreasuryPosition
+    call : ContractId MarginCall
+
 template TreasuryPosition
   with
     investor : Party
     custodian : Party
     auditor : Party
     cusip : Text
+    issuer : Text
     faceValue : Decimal
     marketValue : Decimal
     haircutPct : Decimal
+    maturityDate : Text
+    liquidityTier : Text
+    eligible : Bool
+    riskNotes : Text
   where
     signatory investor, custodian
     observer auditor
@@ -33,12 +47,15 @@ template MarginCall
     requiredValue : Decimal
     currency : Text
     reason : Text
+    callType : Text
+    counterpartyExposure : Decimal
+    minimumHaircutPct : Decimal
     dueDate : Time
     status : CallStatus
   where
     signatory securedParty
     observer investor, auditor
-    ensure requiredValue > 0.0
+    ensure requiredValue > 0.0 && counterpartyExposure >= requiredValue
 
     choice OfferCollateral : ContractId CollateralOffer
       with
@@ -52,6 +69,8 @@ template MarginCall
         position <- fetch positionCid
         assertMsg "position belongs to investor" (position.investor == investor)
         assertMsg "custodian mismatch" (position.custodian == custodian)
+        assertMsg "position is not eligible collateral" position.eligible
+        assertMsg "haircut below secured party minimum" (haircutPct >= minimumHaircutPct)
         assertMsg "pledged value too small" (pledgedValue >= requiredValue)
         create CollateralOffer with
           callId = self
@@ -63,6 +82,7 @@ template MarginCall
           pledgedValue
           haircutPct
           currency
+          recommendationNote = "Auto-selected lowest haircut eligible UST position."
 
 template CollateralOffer
   with
@@ -75,6 +95,7 @@ template CollateralOffer
     pledgedValue : Decimal
     haircutPct : Decimal
     currency : Text
+    recommendationNote : Text
   where
     signatory investor
     observer securedParty, custodian, auditor
@@ -95,6 +116,7 @@ template CollateralOffer
           lockedValue = pledgedValue
           haircutPct
           currency
+          recommendationNote
 
 template LockedCollateral
   with
@@ -107,6 +129,7 @@ template LockedCollateral
     lockedValue : Decimal
     haircutPct : Decimal
     currency : Text
+    recommendationNote : Text
   where
     signatory custodian
     observer investor, securedParty, auditor
@@ -124,6 +147,7 @@ template LockedCollateral
           pledgedValue = lockedValue
           haircutPct
           currency
+          recommendationNote
           terminalStatus = PledgeActive
 
 template ActivePledge
@@ -136,6 +160,7 @@ template ActivePledge
     pledgedValue : Decimal
     haircutPct : Decimal
     currency : Text
+    recommendationNote : Text
     terminalStatus : CallStatus
   where
     signatory securedParty
@@ -154,6 +179,7 @@ template ActivePledge
           positionCid
           finalStatus = Released
           summary = "Collateral released after exposure normalized."
+          recommendationNote
 
     choice SeizeCollateral : ContractId PledgeCloseout
       controller securedParty
@@ -167,6 +193,7 @@ template ActivePledge
           positionCid
           finalStatus = Seized
           summary = "Collateral seized after cure window expired."
+          recommendationNote
 
 template PledgeCloseout
   with
@@ -177,27 +204,38 @@ template PledgeCloseout
     positionCid : ContractId TreasuryPosition
     finalStatus : CallStatus
     summary : Text
+    recommendationNote : Text
   where
     signatory securedParty
     observer investor, custodian, auditor
 
-workflowHappyPath : Script ()
-workflowHappyPath = script do
-  investor <- allocatePartyWithHint "AtlasFund" (PartyIdHint "AtlasFund")
-  securedParty <- allocatePartyWithHint "NorthBank" (PartyIdHint "NorthBank")
-  custodian <- allocatePartyWithHint "ClearVault" (PartyIdHint "ClearVault")
-  auditor <- allocatePartyWithHint "RegSight" (PartyIdHint "RegSight")
+setupParties : Script (Party, Party, Party, Party)
+setupParties = script do
+  investor <- allocatePartyByHint (PartyIdHint "AtlasFund")
+  securedParty <- allocatePartyByHint (PartyIdHint "NorthBank")
+  custodian <- allocatePartyByHint (PartyIdHint "ClearVault")
+  auditor <- allocatePartyByHint (PartyIdHint "RegSight")
+  pure (investor, securedParty, custodian, auditor)
+
+setupWorkflow : Script WorkflowSetup
+setupWorkflow = script do
+  (investor, securedParty, custodian, auditor) <- setupParties
   dueDate <- getTime
 
-  position <- submitMulti [investor, custodian] [] do
+  position <- submit (actAs [investor, custodian]) do
     createCmd TreasuryPosition with
       investor
       custodian
       auditor
       cusip = "91282CJC6"
+      issuer = "U.S. Treasury"
       faceValue = 5000000.0
       marketValue = 4965000.0
       haircutPct = 2.0
+      maturityDate = "2028-01-31"
+      liquidityTier = "Tier 1"
+      eligible = True
+      riskNotes = "On-the-run Treasury; high liquidity; custodian-verified."
 
   call <- submit securedParty do
     createCmd MarginCall with
@@ -207,23 +245,59 @@ workflowHappyPath = script do
       requiredValue = 4750000.0
       currency = "USD"
       reason = "Intraday repo exposure breach"
+      callType = "Repo margin call"
+      counterpartyExposure = 11900000.0
+      minimumHaircutPct = 2.0
       dueDate
       status = CallOpen
+  pure WorkflowSetup with
+    investor
+    securedParty
+    custodian
+    auditor
+    position
+    call
 
-  offer <- submit investor do
-    exerciseCmd call OfferCollateral with
-      positionCid = position
-      custodian
+workflowHappyPath : Script ()
+workflowHappyPath = script do
+  setup <- setupWorkflow
+
+  offer <- submit setup.investor do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position
+      custodian = setup.custodian
       pledgedValue = 4865700.0
       haircutPct = 2.0
 
-  locked <- submit custodian do
+  locked <- submit setup.custodian do
     exerciseCmd offer LockByCustodian
 
-  pledge <- submit securedParty do
+  pledge <- submit setup.securedParty do
     exerciseCmd locked AcceptPledge
 
-  _closeout <- submit securedParty do
+  _closeout <- submit setup.securedParty do
     exerciseCmd pledge ReleaseCollateral
+
+  pure ()
+
+workflowDefaultPath : Script ()
+workflowDefaultPath = script do
+  setup <- setupWorkflow
+
+  offer <- submit setup.investor do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position
+      custodian = setup.custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  locked <- submit setup.custodian do
+    exerciseCmd offer LockByCustodian
+
+  pledge <- submit setup.securedParty do
+    exerciseCmd locked AcceptPledge
+
+  _closeout <- submit setup.securedParty do
+    exerciseCmd pledge SeizeCollateral
 
   pure ()

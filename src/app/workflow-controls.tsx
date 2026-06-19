@@ -29,6 +29,10 @@ const actionCopy: Record<WorkflowAction, { label: string; helper: string }> = {
     label: "Seize Collateral",
     helper: "Closes the active pledge as seized after default.",
   },
+  default: {
+    label: "Run Default Closeout",
+    helper: "Exercises SeizeCollateral to prove the downside path after cure-window failure.",
+  },
 };
 
 export function WorkflowControls({

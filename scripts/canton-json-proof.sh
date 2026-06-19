@@ -4,11 +4,13 @@ set -euo pipefail
 API_URL="${CANTON_JSON_API_URL:-http://localhost:7575}"
 APP_URL="${APP_URL:-http://localhost:3000}"
 DAR_PATH="${DAR_PATH:-contracts/.daml/dist/collateralops-0.1.0.dar}"
+CLOSEOUT_ACTION="${CLOSEOUT_ACTION:-release}"
 
 echo "CollateralOps Canton JSON API proof"
 echo "API_URL=$API_URL"
 echo "APP_URL=$APP_URL"
 echo "DAR_PATH=$DAR_PATH"
+echo "CLOSEOUT_ACTION=$CLOSEOUT_ACTION"
 echo
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -34,7 +36,18 @@ for endpoint in bootstrap; do
   echo
 done
 
-for action in offer lock accept release; do
+echo "2a. Investor-scoped collateral recommendation"
+curl -fsS -X POST "$APP_URL/api/workflow/recommend" \
+  -H "Content-Type: application/json" \
+  -d '{"party":"investor"}'
+echo
+
+if [ "$CLOSEOUT_ACTION" != "release" ] && [ "$CLOSEOUT_ACTION" != "default" ]; then
+  echo "CLOSEOUT_ACTION must be release or default" >&2
+  exit 1
+fi
+
+for action in offer lock accept "$CLOSEOUT_ACTION"; do
   curl -fsS -X POST "$APP_URL/api/workflow/action" \
     -H "Content-Type: application/json" \
     -d "{\"action\":\"$action\"}"
