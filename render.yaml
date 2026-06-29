@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: collateralops-canton-preview
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.canton
+    healthCheckPath: /livez
+    envVars:
+      - key: CANTON_JSON_PORT
+        value: 7575

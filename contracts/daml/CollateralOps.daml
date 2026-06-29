@@ -19,6 +19,7 @@ data WorkflowSetup = WorkflowSetup
     auditor : Party
     position : ContractId TreasuryPosition
     call : ContractId MarginCall
+    terms : ContractId ExposureTerms
 
 template TreasuryPosition
   with
@@ -82,7 +83,20 @@ template MarginCall
           pledgedValue
           haircutPct
           currency
-          recommendationNote = "Auto-selected lowest haircut eligible UST position."
+          recommendationNote = "Auto-selected lowest-surplus eligible UST position."
+
+template ExposureTerms
+  with
+    securedParty : Party
+    investor : Party
+    valuationSource : Text
+    disputeWindowHours : Int
+    closeoutThresholdPct : Decimal
+    sensitiveNote : Text
+  where
+    signatory securedParty
+    observer investor
+    ensure disputeWindowHours > 0 && closeoutThresholdPct > 0.0
 
 template CollateralOffer
   with
@@ -250,6 +264,16 @@ setupWorkflow = script do
       minimumHaircutPct = 2.0
       dueDate
       status = CallOpen
+
+  terms <- submit securedParty do
+    createCmd ExposureTerms with
+      securedParty
+      investor
+      valuationSource = "NorthBank internal repo book + custodian marks"
+      disputeWindowHours = 4
+      closeoutThresholdPct = 102.0
+      sensitiveNote = "Counterparty watchlist flag remains private to AtlasFund and NorthBank."
+
   pure WorkflowSetup with
     investor
     securedParty
@@ -257,6 +281,7 @@ setupWorkflow = script do
     auditor
     position
     call
+    terms
 
 workflowHappyPath : Script ()
 workflowHappyPath = script do
@@ -299,5 +324,35 @@ workflowDefaultPath = script do
 
   _closeout <- submit setup.securedParty do
     exerciseCmd pledge SeizeCollateral
+
+  pure ()
+
+workflowPrivacyVisibility : Script ()
+workflowPrivacyVisibility = script do
+  setup <- setupWorkflow
+
+  investorTerms <- query @ExposureTerms setup.investor
+  securedTerms <- query @ExposureTerms setup.securedParty
+  custodianTerms <- query @ExposureTerms setup.custodian
+  auditorTerms <- query @ExposureTerms setup.auditor
+
+  assertMsg "investor should see private exposure terms" (length investorTerms == 1)
+  assertMsg "secured party should see private exposure terms" (length securedTerms == 1)
+  assertMsg "custodian should not see private exposure terms" (length custodianTerms == 0)
+  assertMsg "auditor should not see private exposure terms" (length auditorTerms == 0)
+
+workflowWrongPartyRejected : Script ()
+workflowWrongPartyRejected = script do
+  setup <- setupWorkflow
+
+  submitMustFail setup.custodian do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position
+      custodian = setup.custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  submitMustFail setup.investor do
+    exerciseCmd setup.terms Archive
 
   pure ()

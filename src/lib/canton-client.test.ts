@@ -41,7 +41,7 @@ function position(overrides: Partial<TreasuryPosition>): TreasuryPosition {
 }
 
 describe("makeRecommendations", () => {
-  it("ranks eligible collateral by post-haircut coverage", () => {
+  it("ranks eligible collateral by lowest sufficient post-haircut surplus", () => {
     const recommendations = makeRecommendations(
       [
         position({ id: "small", cusip: "91282CJA0", marketValue: 4_900_000, postHaircutValue: 4_802_000 }),
@@ -51,11 +51,12 @@ describe("makeRecommendations", () => {
     );
 
     expect(recommendations).toHaveLength(2);
-    expect(recommendations[0]).toMatchObject({ positionId: "large", rank: 1 });
+    expect(recommendations[0]).toMatchObject({ positionId: "small", rank: 1, selectable: true });
     expect(recommendations[0].warnings).toEqual([]);
+    expect(recommendations[0].surplusValue).toBe(52_000);
   });
 
-  it("excludes positions that fail eligibility, haircut, or coverage checks", () => {
+  it("keeps rejected collateral visible with policy reasons", () => {
     const recommendations = makeRecommendations(
       [
         position({ id: "ineligible", eligible: false }),
@@ -65,6 +66,12 @@ describe("makeRecommendations", () => {
       [baseCall],
     );
 
-    expect(recommendations).toEqual([]);
+    expect(recommendations).toHaveLength(3);
+    expect(recommendations.every((recommendation) => !recommendation.selectable)).toBe(true);
+    expect(recommendations.map((recommendation) => recommendation.rejectionReasons[0])).toEqual([
+      "Position is not eligible for this call.",
+      "Haircut is below secured-party minimum.",
+      "Post-haircut value is below required collateral.",
+    ]);
   });
 });

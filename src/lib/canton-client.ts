@@ -5,24 +5,31 @@ import type {
   CantonContract,
   CollateralRecommendation,
   CollateralOffer,
+  ExposureTerms,
   LockedCollateral,
   MarginCall,
   PartyDirectory,
   PartyRole,
+  PartyVisibilityProof,
   PledgeCloseout,
   TreasuryPosition,
   WorkflowAction,
   WorkflowResult,
+  WorkflowScenario,
+  WorkflowSessionState,
   WorkflowSnapshot,
   WorkflowStage,
 } from "./types";
 
+const roleOrder: PartyRole[] = ["investor", "securedParty", "custodian", "auditor"];
 const partyRoleSchema = z.enum(["investor", "securedParty", "custodian", "auditor"]);
+const workflowScenarioSchema = z.enum(["standard", "default-risk", "undercovered"]);
 const actionSchema = z.enum(["bootstrap", "offer", "lock", "accept", "release", "seize", "default"]);
 
 const templateIds = {
   TreasuryPosition: "#collateralops:CollateralOps:TreasuryPosition",
   MarginCall: "#collateralops:CollateralOps:MarginCall",
+  ExposureTerms: "#collateralops:CollateralOps:ExposureTerms",
   CollateralOffer: "#collateralops:CollateralOps:CollateralOffer",
   LockedCollateral: "#collateralops:CollateralOps:LockedCollateral",
   ActivePledge: "#collateralops:CollateralOps:ActivePledge",
@@ -38,11 +45,212 @@ const partyHints = {
 
 const globalKey = "__collateralops_canton_context__";
 
+interface WorkflowContext extends WorkflowSessionState {
+  parties?: PartyDirectory;
+  activeAtOffset?: number;
+  scenario?: WorkflowScenario;
+  lastAction?: WorkflowAction;
+  mutationTimestamps?: number[];
+}
+
+type PartyScopedContracts = Record<PartyRole, CantonContract[]>;
+
 type GlobalWithContext = typeof globalThis & {
   [globalKey]?: {
-    parties?: PartyDirectory;
-    activeAtOffset?: number;
+    sessions: Record<string, WorkflowContext>;
   };
+};
+
+interface WorkflowActionOptions {
+  sessionId?: string;
+  scenario?: WorkflowScenario;
+  persistedContext?: WorkflowSessionState;
+}
+
+interface TreasurySeed {
+  cusip: string;
+  issuer: string;
+  faceValue: number;
+  marketValue: number;
+  haircutPct: number;
+  maturityDate: string;
+  liquidityTier: string;
+  eligible: boolean;
+  riskNotes: string;
+}
+
+interface ScenarioConfig {
+  call: {
+    requiredValue: number;
+    reason: string;
+    callType: string;
+    counterpartyExposure: number;
+    minimumHaircutPct: number;
+    dueDate: string;
+  };
+  terms: {
+    valuationSource: string;
+    disputeWindowHours: number;
+    closeoutThresholdPct: number;
+    sensitiveNote: string;
+  };
+  positions: TreasurySeed[];
+}
+
+const scenarioConfigs: Record<WorkflowScenario, ScenarioConfig> = {
+  standard: {
+    call: {
+      requiredValue: 4_750_000,
+      reason: "Intraday repo exposure breach after 2.8% UST price move",
+      callType: "Repo margin call",
+      counterpartyExposure: 11_900_000,
+      minimumHaircutPct: 2,
+      dueDate: "2026-06-29T18:00:00Z",
+    },
+    terms: {
+      valuationSource: "NorthBank internal repo book + custodian marks",
+      disputeWindowHours: 4,
+      closeoutThresholdPct: 102,
+      sensitiveNote: "Counterparty watchlist flag remains private to AtlasFund and NorthBank.",
+    },
+    positions: [
+      {
+        cusip: "91282CJC6",
+        issuer: "U.S. Treasury",
+        faceValue: 5_000_000,
+        marketValue: 4_965_000,
+        haircutPct: 2,
+        maturityDate: "2028-01-31",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "On-the-run Treasury; high liquidity; custodian-verified.",
+      },
+      {
+        cusip: "91282CKQ3",
+        issuer: "U.S. Treasury",
+        faceValue: 6_000_000,
+        marketValue: 5_945_000,
+        haircutPct: 2.5,
+        maturityDate: "2029-05-15",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Larger position available but creates avoidable over-pledge.",
+      },
+      {
+        cusip: "3130AQF42",
+        issuer: "Agency note",
+        faceValue: 5_000_000,
+        marketValue: 4_980_000,
+        haircutPct: 3,
+        maturityDate: "2027-09-30",
+        liquidityTier: "Tier 2",
+        eligible: false,
+        riskNotes: "Not eligible for this secured-party Treasury-only call.",
+      },
+    ],
+  },
+  "default-risk": {
+    call: {
+      requiredValue: 4_750_000,
+      reason: "Repo exposure breach with cure-window default risk",
+      callType: "Repo margin call",
+      counterpartyExposure: 12_600_000,
+      minimumHaircutPct: 2,
+      dueDate: "2026-06-29T17:00:00Z",
+    },
+    terms: {
+      valuationSource: "NorthBank stressed marks and cure-window monitor",
+      disputeWindowHours: 2,
+      closeoutThresholdPct: 104,
+      sensitiveNote: "Default cure clock is visible only to the investor and secured party.",
+    },
+    positions: [
+      {
+        cusip: "91282CJC6",
+        issuer: "U.S. Treasury",
+        faceValue: 5_000_000,
+        marketValue: 4_965_000,
+        haircutPct: 2,
+        maturityDate: "2028-01-31",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Close to requirement; preferred unless the secured party demands a stress buffer.",
+      },
+      {
+        cusip: "91282CKQ3",
+        issuer: "U.S. Treasury",
+        faceValue: 5_500_000,
+        marketValue: 5_430_000,
+        haircutPct: 2,
+        maturityDate: "2029-05-15",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Higher cushion for default-risk branch.",
+      },
+    ],
+  },
+  undercovered: {
+    call: {
+      requiredValue: 4_750_000,
+      reason: "Intraday call where first-choice collateral fails coverage checks",
+      callType: "Repo margin call",
+      counterpartyExposure: 11_900_000,
+      minimumHaircutPct: 2,
+      dueDate: "2026-06-29T18:00:00Z",
+    },
+    terms: {
+      valuationSource: "NorthBank margin engine with custodian liquidity flags",
+      disputeWindowHours: 3,
+      closeoutThresholdPct: 103,
+      sensitiveNote: "Fallback collateral is disclosed only after rejected positions are evaluated.",
+    },
+    positions: [
+      {
+        cusip: "91282CJA0",
+        issuer: "U.S. Treasury",
+        faceValue: 4_200_000,
+        marketValue: 4_080_000,
+        haircutPct: 2,
+        maturityDate: "2027-12-31",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Operationally preferred but below the required post-haircut value.",
+      },
+      {
+        cusip: "91282CJB8",
+        issuer: "U.S. Treasury",
+        faceValue: 5_000_000,
+        marketValue: 4_920_000,
+        haircutPct: 1,
+        maturityDate: "2028-01-15",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Liquid but below NorthBank's minimum haircut policy.",
+      },
+      {
+        cusip: "3130AQF42",
+        issuer: "Agency note",
+        faceValue: 5_200_000,
+        marketValue: 5_050_000,
+        haircutPct: 3,
+        maturityDate: "2027-09-30",
+        liquidityTier: "Tier 2",
+        eligible: false,
+        riskNotes: "Rejected because this call accepts UST collateral only.",
+      },
+      {
+        cusip: "91282CKQ3",
+        issuer: "U.S. Treasury",
+        faceValue: 5_100_000,
+        marketValue: 4_990_000,
+        haircutPct: 2,
+        maturityDate: "2029-05-15",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Fallback position that satisfies the secured-party rule with minimal surplus.",
+      },
+    ],
+  },
 };
 
 export const partyQuerySchema = z.object({
@@ -51,21 +259,28 @@ export const partyQuerySchema = z.object({
 
 export const actionBodySchema = z.object({
   action: actionSchema,
+  scenario: workflowScenarioSchema.optional(),
 });
 
-export async function getSnapshot(activeParty: PartyRole): Promise<WorkflowSnapshot> {
+export async function getSnapshot(
+  activeParty: PartyRole,
+  sessionId = "preview-session",
+  persistedContext?: WorkflowSessionState,
+): Promise<WorkflowSnapshot> {
   const client = cantonClient();
-  const context = getContext();
+  const context = getContext(sessionId, persistedContext);
   const parties = context.parties ?? partyHints;
-  const bootstrapped = Boolean(context.activeAtOffset);
-  const rawContracts = context.activeAtOffset
-    ? await queryActiveContracts(client, parties[activeParty], context.activeAtOffset)
-    : [];
+  const scenario = context.scenario ?? "standard";
+  const bootstrapped = Boolean(context.activeAtOffset && context.parties);
+  const scopedContracts = bootstrapped
+    ? await queryPartyScopedContracts(client, parties as PartyDirectory, context.activeAtOffset!)
+    : emptyScopedContracts();
+  const rawContracts = scopedContracts[activeParty];
   const contracts = filterVisibleContracts(rawContracts, activeParty, parties as PartyDirectory);
 
   const mapped = mapContracts(contracts, activeParty, parties as PartyDirectory);
   const stage = inferStage(mapped);
-  const receipts = makeReceipts(mapped, stage);
+  const receipts = makeReceipts(mapped, stage, context.lastAction);
   const recommendations = makeRecommendations(mapped.positions, mapped.calls);
 
   return {
@@ -73,9 +288,12 @@ export async function getSnapshot(activeParty: PartyRole): Promise<WorkflowSnaps
     activeParty,
     parties: parties as PartyDirectory,
     stage,
+    scenario,
+    sessionScoped: sessionId !== "preview-session",
     contracts: [
       ...mapped.positions,
       ...mapped.calls,
+      ...mapped.terms,
       ...mapped.offers,
       ...mapped.locks,
       ...mapped.pledges,
@@ -89,10 +307,14 @@ export async function getSnapshot(activeParty: PartyRole): Promise<WorkflowSnaps
       visibleContractCount: contracts.length,
       visibleTemplateIds: [...new Set(contracts.map((contract) => contract.templateId))],
       partyScopedQuery: `active-contracts filtered by ${parties[activeParty]}`,
+      partyVisibility: makePartyVisibilityProof(scopedContracts, parties as PartyDirectory),
+      lastAction: context.lastAction,
+      scenario,
     },
     visibility: {
       TreasuryPosition: mapped.positions.length > 0,
       MarginCall: mapped.calls.length > 0,
+      ExposureTerms: mapped.terms.length > 0,
       CollateralOffer: mapped.offers.length > 0,
       LockedCollateral: mapped.locks.length > 0,
       ActivePledge: mapped.pledges.length > 0,
@@ -105,34 +327,60 @@ export async function getSnapshot(activeParty: PartyRole): Promise<WorkflowSnaps
   };
 }
 
-export async function runWorkflowAction(action: WorkflowAction): Promise<WorkflowResult> {
+export async function runWorkflowAction(
+  action: WorkflowAction,
+  options: WorkflowActionOptions = {},
+): Promise<WorkflowResult> {
   const client = cantonClient();
-  const context = getContext();
+  const context = getContext(options.sessionId ?? "preview-session", options.persistedContext);
+  enforceMutationRateLimit(context);
 
   if (action === "bootstrap") {
+    const scenario = options.scenario ?? "standard";
+    const config = scenarioConfigs[scenario];
     const parties = await allocateParties(client);
-    const position = await submit(client, {
+    const positionResult = await submit(client, {
       userId: "ledger-api-user",
-      commandId: commandId("create-position"),
+      commandId: commandId("create-positions"),
       actAs: [parties.investor, parties.custodian],
       readAs: [parties.investor, parties.custodian, parties.auditor],
+      commands: config.positions.map((position) => ({
+        CreateCommand: {
+          templateId: templateIds.TreasuryPosition,
+          createArguments: {
+            investor: parties.investor,
+            custodian: parties.custodian,
+            auditor: parties.auditor,
+            cusip: position.cusip,
+            issuer: position.issuer,
+            faceValue: decimalString(position.faceValue),
+            marketValue: decimalString(position.marketValue),
+            haircutPct: decimalString(position.haircutPct),
+            maturityDate: position.maturityDate,
+            liquidityTier: position.liquidityTier,
+            eligible: position.eligible,
+            riskNotes: position.riskNotes,
+          },
+        },
+      })),
+    });
+
+    const terms = await submit(client, {
+      userId: "ledger-api-user",
+      commandId: commandId("create-exposure-terms"),
+      actAs: [parties.securedParty],
+      readAs: [parties.securedParty, parties.investor],
       commands: [
         {
           CreateCommand: {
-            templateId: templateIds.TreasuryPosition,
+            templateId: templateIds.ExposureTerms,
             createArguments: {
+              securedParty: parties.securedParty,
               investor: parties.investor,
-              custodian: parties.custodian,
-              auditor: parties.auditor,
-              cusip: "91282CJC6",
-              issuer: "U.S. Treasury",
-              faceValue: "5000000.0",
-              marketValue: "4965000.0",
-              haircutPct: "2.0",
-              maturityDate: "2028-01-31",
-              liquidityTier: "Tier 1",
-              eligible: true,
-              riskNotes: "On-the-run Treasury; high liquidity; custodian-verified.",
+              valuationSource: config.terms.valuationSource,
+              disputeWindowHours: String(config.terms.disputeWindowHours),
+              closeoutThresholdPct: decimalString(config.terms.closeoutThresholdPct),
+              sensitiveNote: config.terms.sensitiveNote,
             },
           },
         },
@@ -152,13 +400,13 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
               securedParty: parties.securedParty,
               investor: parties.investor,
               auditor: parties.auditor,
-              requiredValue: "4750000.0",
+              requiredValue: decimalString(config.call.requiredValue),
               currency: "USD",
-              reason: "Intraday repo exposure breach after 2.8% UST price move",
-              callType: "Repo margin call",
-              counterpartyExposure: "11900000.0",
-              minimumHaircutPct: "2.0",
-              dueDate: "2026-06-17T18:00:00Z",
+              reason: config.call.reason,
+              callType: config.call.callType,
+              counterpartyExposure: decimalString(config.call.counterpartyExposure),
+              minimumHaircutPct: decimalString(config.call.minimumHaircutPct),
+              dueDate: config.call.dueDate,
               status: "CallOpen",
             },
           },
@@ -167,19 +415,25 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
     });
 
     context.parties = parties;
-    context.activeAtOffset = maxOffset(position, call);
-    return ok(action, "call-open", context.activeAtOffset, "Bootstrapped parties, TreasuryPosition, and MarginCall on Canton.");
+    context.scenario = scenario;
+    context.lastAction = action;
+    context.activeAtOffset = maxOffset(positionResult, terms, call);
+    return ok(action, "call-open", scenario, context.activeAtOffset, "Bootstrapped parties, inventory, private terms, and MarginCall on Canton.");
   }
 
   const parties = requireParties(context);
   const offset = requireOffset(context);
+  const scenario = context.scenario ?? "standard";
 
   if (action === "offer") {
     const investorContracts = filterVisibleContracts(await queryActiveContracts(client, parties.investor, offset), "investor", parties);
     const call = requireContract(investorContracts, "MarginCall");
     const mapped = mapContracts(investorContracts, "investor", parties);
     const recommendation = requireRecommendation(makeRecommendations(mapped.positions, mapped.calls));
-    const position = investorContracts.find((contract) => contract.contractId === recommendation.positionId) ?? requireContract(investorContracts, "TreasuryPosition");
+    const position =
+      investorContracts.find((contract) => contract.contractId === recommendation.positionId) ??
+      requireContract(investorContracts, "TreasuryPosition");
+    const selectedPosition = mapped.positions.find((item) => item.id === recommendation.positionId);
     const result = await submit(client, {
       userId: "ledger-api-user",
       commandId: commandId("offer"),
@@ -189,20 +443,21 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
         {
           ExerciseCommand: {
             templateId: templateIds.MarginCall,
-              contractId: call.contractId,
-              choice: "OfferCollateral",
-              choiceArgument: {
-                positionCid: position.contractId,
-                custodian: parties.custodian,
-                pledgedValue: recommendation.pledgeAmount.toFixed(1),
-                haircutPct: mapped.positions.find((item) => item.id === recommendation.positionId)?.haircutPct.toFixed(1) ?? "2.0",
-              },
+            contractId: call.contractId,
+            choice: "OfferCollateral",
+            choiceArgument: {
+              positionCid: position.contractId,
+              custodian: parties.custodian,
+              pledgedValue: recommendation.pledgeAmount.toFixed(1),
+              haircutPct: selectedPosition?.haircutPct.toFixed(1) ?? "2.0",
             },
+          },
         },
       ],
     });
     context.activeAtOffset = Number(result.completionOffset);
-    return ok(action, "offer-posted", context.activeAtOffset, "Investor offered tokenized UST collateral on Canton.");
+    context.lastAction = action;
+    return ok(action, "offer-posted", scenario, context.activeAtOffset, "Investor offered the lowest-surplus eligible Treasury position on Canton.");
   }
 
   if (action === "lock") {
@@ -210,7 +465,8 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
     const offer = requireContract(custodianContracts, "CollateralOffer");
     const result = await submitExercise(client, parties.custodian, templateIds.CollateralOffer, offer.contractId, "LockByCustodian", {});
     context.activeAtOffset = Number(result.completionOffset);
-    return ok(action, "collateral-locked", context.activeAtOffset, "Custodian locked pledged collateral on Canton.");
+    context.lastAction = action;
+    return ok(action, "collateral-locked", scenario, context.activeAtOffset, "Custodian locked pledged collateral on Canton.");
   }
 
   if (action === "accept") {
@@ -218,7 +474,8 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
     const locked = requireContract(securedContracts, "LockedCollateral");
     const result = await submitExercise(client, parties.securedParty, templateIds.LockedCollateral, locked.contractId, "AcceptPledge", {});
     context.activeAtOffset = Number(result.completionOffset);
-    return ok(action, "pledge-active", context.activeAtOffset, "Secured party accepted the active pledge on Canton.");
+    context.lastAction = action;
+    return ok(action, "pledge-active", scenario, context.activeAtOffset, "Secured party accepted the active pledge on Canton.");
   }
 
   if (action === "release" || action === "seize" || action === "default") {
@@ -234,10 +491,12 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
       {},
     );
     context.activeAtOffset = Number(result.completionOffset);
+    context.lastAction = action;
     const stage = action === "release" ? "released" : "seized";
     return ok(
       action,
       stage,
+      scenario,
       context.activeAtOffset,
       `Secured party ${action === "release" ? "released" : "seized"} collateral on Canton.`,
     );
@@ -246,10 +505,27 @@ export async function runWorkflowAction(action: WorkflowAction): Promise<Workflo
   throw new Error(`Unsupported action ${action}`);
 }
 
+export function resetWorkflowContext(sessionId: string) {
+  const target = globalThis as GlobalWithContext;
+  if (target[globalKey]?.sessions[sessionId]) {
+    delete target[globalKey]!.sessions[sessionId];
+  }
+}
+
+export function getWorkflowSessionState(sessionId: string): WorkflowSessionState {
+  const context = getContext(sessionId);
+  return {
+    parties: context.parties,
+    activeAtOffset: context.activeAtOffset,
+    scenario: context.scenario,
+    lastAction: context.lastAction,
+  };
+}
+
 export async function checkCantonHealth() {
   try {
     const client = cantonClient();
-    const response = await fetch(`${client.baseUrl}/livez`, { cache: "no-store" });
+    const response = await fetchWithTimeout(`${client.baseUrl}/livez`, { cache: "no-store" }, healthTimeoutMs(), "Canton health check");
     return {
       mode: "canton-json-api",
       healthy: response.ok,
@@ -272,10 +548,31 @@ function cantonClient() {
   return { baseUrl };
 }
 
-function getContext() {
+function getContext(sessionId: string, persistedContext?: WorkflowSessionState): WorkflowContext {
   const target = globalThis as GlobalWithContext;
-  target[globalKey] ??= {};
-  return target[globalKey]!;
+  target[globalKey] ??= { sessions: {} };
+  target[globalKey]!.sessions[sessionId] ??= {};
+  if (persistedContext) {
+    target[globalKey]!.sessions[sessionId] = {
+      ...target[globalKey]!.sessions[sessionId],
+      ...persistedContext,
+    };
+  }
+  return target[globalKey]!.sessions[sessionId];
+}
+
+function enforceMutationRateLimit(context: WorkflowContext) {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const maxMutations = 40;
+  const recent = (context.mutationTimestamps ?? []).filter((timestamp) => now - timestamp < windowMs);
+
+  if (recent.length >= maxMutations) {
+    throw new Error("Demo mutation limit reached. Reset the session or wait before submitting more commands.");
+  }
+
+  recent.push(now);
+  context.mutationTimestamps = recent;
 }
 
 async function allocateParties(client: { baseUrl: string }): Promise<PartyDirectory> {
@@ -320,6 +617,21 @@ async function submitExercise(
   });
 }
 
+async function queryPartyScopedContracts(
+  client: { baseUrl: string },
+  parties: PartyDirectory,
+  activeAtOffset: number,
+): Promise<PartyScopedContracts> {
+  const entries = await Promise.all(
+    roleOrder.map(async (role) => {
+      const contracts = await queryActiveContracts(client, parties[role], activeAtOffset);
+      return [role, filterVisibleContracts(contracts, role, parties)] as const;
+    }),
+  );
+
+  return Object.fromEntries(entries) as PartyScopedContracts;
+}
+
 async function queryActiveContracts(client: { baseUrl: string }, party: string, activeAtOffset: number): Promise<CantonContract[]> {
   const data = await postJson(client, "/v2/state/active-contracts", {
     eventFormat: {
@@ -343,7 +655,6 @@ async function queryActiveContracts(client: { baseUrl: string }, party: string, 
       },
       verbose: false,
     },
-    verbose: false,
     activeAtOffset,
   });
 
@@ -356,16 +667,24 @@ async function queryActiveContracts(client: { baseUrl: string }, party: string, 
       contractId: String(event.contractId),
       templateId: String(event.templateId),
       payload: event.createArgument ?? {},
+      witnessParties: stringArray(event.witnessParties),
+      signatories: stringArray(event.signatories),
+      observers: stringArray(event.observers),
     }));
 }
 
 async function postJson(client: { baseUrl: string }, path: string, body: Record<string, unknown>) {
-  const response = await fetch(`${client.baseUrl}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
+  const response = await fetchWithTimeout(
+    `${client.baseUrl}${path}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    },
+    requestTimeoutMs(),
+    `Canton ${path}`,
+  );
 
   const text = await response.text();
   const json = text ? JSON.parse(text) : {};
@@ -375,6 +694,20 @@ async function postJson(client: { baseUrl: string }, path: string, body: Record<
   }
 
   return json;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string) {
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(`${label} did not respond within ${Math.round(timeoutMs / 1000)}s. If the Render backend is waking up, wait a moment and retry.`);
+    }
+    throw error;
+  }
 }
 
 function requireParties(context: { parties?: PartyDirectory }): PartyDirectory {
@@ -400,7 +733,11 @@ function requireContract(contracts: CantonContract[], kind: keyof typeof templat
 }
 
 function filterVisibleContracts(contracts: CantonContract[], role: PartyRole, parties: PartyDirectory): CantonContract[] {
-  return contracts.filter((contract) => isCurrentContext(contract, parties) && isVisibleToRole(contract, role, parties));
+  return filterCurrentContextContracts(contracts, parties).filter((contract) => isVisibleToRole(contract, role, parties));
+}
+
+function filterCurrentContextContracts(contracts: CantonContract[], parties: PartyDirectory): CantonContract[] {
+  return contracts.filter((contract) => isCurrentContext(contract, parties));
 }
 
 function isCurrentContext(contract: CantonContract, parties: PartyDirectory): boolean {
@@ -413,6 +750,8 @@ function isCurrentContext(contract: CantonContract, parties: PartyDirectory): bo
 function isVisibleToRole(contract: CantonContract, role: PartyRole, parties: PartyDirectory): boolean {
   const payload = contract.payload;
   const party = parties[role];
+
+  if (contract.witnessParties?.length) return contract.witnessParties.includes(party);
 
   if (role === "investor") return text(payload.investor) === party;
   if (role === "securedParty") return text(payload.securedParty) === party;
@@ -427,12 +766,19 @@ function maxOffset(...responses: { completionOffset: number | string }[]): numbe
   return Math.max(...responses.map((item) => Number(item.completionOffset)));
 }
 
-function ok(action: WorkflowAction, stage: WorkflowStage, offset: number | undefined, message: string): WorkflowResult {
+function ok(
+  action: WorkflowAction,
+  stage: WorkflowStage,
+  scenario: WorkflowScenario,
+  offset: number | undefined,
+  message: string,
+): WorkflowResult {
   return {
     ok: true,
     mode: "canton-json-api",
     action,
     stage,
+    scenario,
     updateId: offset ? String(offset) : undefined,
     message,
   };
@@ -442,9 +788,18 @@ function commandId(action: string) {
   return `collateralops-${action}-${Date.now()}`;
 }
 
+function healthTimeoutMs() {
+  return Number(process.env.CANTON_HEALTH_TIMEOUT_MS ?? 8_000);
+}
+
+function requestTimeoutMs() {
+  return Number(process.env.CANTON_REQUEST_TIMEOUT_MS ?? 25_000);
+}
+
 function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parties: PartyDirectory) {
   const positions: TreasuryPosition[] = [];
   const calls: MarginCall[] = [];
+  const terms: ExposureTerms[] = [];
   const offers: CollateralOffer[] = [];
   const locks: LockedCollateral[] = [];
   const pledges: ActivePledge[] = [];
@@ -485,6 +840,17 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
         minimumHaircutPct: decimal(contract.payload.minimumHaircutPct),
         dueDate: text(contract.payload.dueDate),
         status: "call-open",
+      });
+    } else if (contract.templateId.includes(":CollateralOps:ExposureTerms")) {
+      terms.push({
+        id: contract.contractId,
+        kind: "ExposureTerms",
+        securedParty: text(contract.payload.securedParty),
+        investor: text(contract.payload.investor),
+        valuationSource: text(contract.payload.valuationSource),
+        disputeWindowHours: integer(contract.payload.disputeWindowHours),
+        closeoutThresholdPct: decimal(contract.payload.closeoutThresholdPct),
+        sensitiveNote: text(contract.payload.sensitiveNote),
       });
     } else if (contract.templateId.includes(":CollateralOps:CollateralOffer")) {
       offers.push({
@@ -546,7 +912,7 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
     }
   }
 
-  return { activeParty, parties, positions, calls, offers, locks, pledges, closeouts };
+  return { activeParty, parties, positions, calls, terms, offers, locks, pledges, closeouts };
 }
 
 function inferStage(mapped: ReturnType<typeof mapContracts>): WorkflowStage {
@@ -576,23 +942,28 @@ function nextActions(stage: WorkflowStage): WorkflowAction[] {
   return ["bootstrap"];
 }
 
-function makeReceipts(mapped: ReturnType<typeof mapContracts>, stage: WorkflowStage): AuditReceipt[] {
+function makeReceipts(
+  mapped: ReturnType<typeof mapContracts>,
+  stage: WorkflowStage,
+  lastAction: WorkflowAction | undefined,
+): AuditReceipt[] {
   if (mapped.activeParty === "custodian") return [];
 
   const timestamp = new Date().toISOString();
   const receipts: AuditReceipt[] = [];
   if (mapped.calls.length > 0) receipts.push(receipt("bootstrap", "securedParty", timestamp, "NorthBank opened a Canton margin call."));
+  if (mapped.terms.length > 0) receipts.push(receipt("bootstrap", "securedParty", timestamp, "Private exposure terms were disclosed only to AtlasFund and NorthBank."));
   if (mapped.offers.length > 0) receipts.push(receipt("offer", "investor", timestamp, "AtlasFund offered tokenized UST collateral."));
   if (mapped.locks.length > 0) receipts.push(receipt("lock", "custodian", timestamp, "ClearVault locked the pledged position."));
   if (mapped.pledges.length > 0 || stage === "pledge-active") receipts.push(receipt("accept", "securedParty", timestamp, "NorthBank accepted the active pledge."));
   if (stage === "released") receipts.push(receipt("release", "securedParty", timestamp, "NorthBank released the collateral on Canton."));
   if (stage === "seized") receipts.push(receipt("default", "securedParty", timestamp, "NorthBank seized the collateral on Canton."));
-  return receipts;
+  return receipts.map((item) => ({ ...item, updateId: lastAction }));
 }
 
 function receipt(action: WorkflowAction, actor: PartyRole, timestamp: string, summary: string): AuditReceipt {
   return {
-    id: `receipt-${action}`,
+    id: `receipt-${action}-${summary.slice(0, 12).replace(/\W/g, "").toLowerCase()}`,
     kind: "AuditReceipt",
     callId: "call",
     visibleTo: ["investor", "securedParty", "auditor"],
@@ -600,6 +971,32 @@ function receipt(action: WorkflowAction, actor: PartyRole, timestamp: string, su
     actor,
     timestamp,
     summary,
+  };
+}
+
+function makePartyVisibilityProof(scopedContracts: PartyScopedContracts, parties: PartyDirectory): PartyVisibilityProof[] {
+  return roleOrder.map((role) => {
+    const contracts = scopedContracts[role] ?? [];
+    const visibleTemplateIds = [...new Set(contracts.map((contract) => contract.templateId))];
+    const seesPrivateTerms = visibleTemplateIds.some((templateId) => templateId.includes(":CollateralOps:ExposureTerms"));
+
+    return {
+      role,
+      party: parties[role],
+      visibleContractCount: contracts.length,
+      visibleTemplateIds,
+      seesPrivateTerms,
+      hiddenSensitiveTemplates: seesPrivateTerms ? [] : ["ExposureTerms"],
+    };
+  });
+}
+
+function emptyScopedContracts(): PartyScopedContracts {
+  return {
+    investor: [],
+    securedParty: [],
+    custodian: [],
+    auditor: [],
   };
 }
 
@@ -613,6 +1010,10 @@ function decimal(value: unknown) {
   return 0;
 }
 
+function integer(value: unknown) {
+  return Math.trunc(decimal(value));
+}
+
 function boolean(value: unknown) {
   return value === true || value === "true";
 }
@@ -623,39 +1024,66 @@ function enumText(value: unknown) {
   return text(value);
 }
 
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => text(item)) : undefined;
+}
+
 function postHaircutValue(marketValue: number, haircutPct: number) {
   return marketValue * (1 - haircutPct / 100);
+}
+
+function decimalString(value: number) {
+  return value.toFixed(1);
 }
 
 export function makeRecommendations(positions: TreasuryPosition[], calls: MarginCall[]): CollateralRecommendation[] {
   const call = calls[0];
   if (!call) return [];
 
-  return positions
-    .map((position) => {
-      const warnings = [];
-      if (!position.eligible) warnings.push("Position is not eligible for this call.");
-      if (position.haircutPct < call.minimumHaircutPct) warnings.push("Haircut is below secured-party minimum.");
-      if (position.postHaircutValue < call.requiredValue) warnings.push("Post-haircut value is below required collateral.");
+  const evaluated = positions.map((position) => {
+    const rejectionReasons = [];
+    if (!position.eligible) rejectionReasons.push("Position is not eligible for this call.");
+    if (position.haircutPct < call.minimumHaircutPct) rejectionReasons.push("Haircut is below secured-party minimum.");
+    if (position.postHaircutValue < call.requiredValue) rejectionReasons.push("Post-haircut value is below required collateral.");
 
-      return {
-        positionId: position.id,
-        cusip: position.cusip,
-        pledgeAmount: Math.max(call.requiredValue, Math.min(position.marketValue, position.postHaircutValue)),
-        postHaircutValue: position.postHaircutValue,
-        coverageRatio: position.postHaircutValue / call.requiredValue,
-        rank: 0,
-        rationale: `${position.liquidityTier} ${position.issuer} collateral covers ${Math.round((position.postHaircutValue / call.requiredValue) * 100)}% of the requirement after haircut.`,
-        warnings,
-      };
-    })
-    .filter((recommendation) => recommendation.warnings.length === 0)
-    .sort((left, right) => right.coverageRatio - left.coverageRatio)
+    const coverageRatio = position.postHaircutValue / call.requiredValue;
+    const surplusValue = position.postHaircutValue - call.requiredValue;
+    const selectable = rejectionReasons.length === 0;
+
+    return {
+      positionId: position.id,
+      cusip: position.cusip,
+      pledgeAmount: position.postHaircutValue,
+      postHaircutValue: position.postHaircutValue,
+      coverageRatio,
+      surplusValue,
+      rank: 0,
+      selectable,
+      selectionReason: selectable
+        ? `Eligible with ${Math.round(coverageRatio * 100)}% coverage and ${Math.round(surplusValue).toLocaleString("en-US")} USD surplus.`
+        : "Rejected by secured-party collateral policy.",
+      rationale: selectable
+        ? `${position.liquidityTier} ${position.issuer} collateral covers ${Math.round(coverageRatio * 100)}% of the requirement after haircut.`
+        : `${position.liquidityTier} ${position.issuer} collateral is visible but not selectable for this call.`,
+      warnings: rejectionReasons,
+      rejectionReasons,
+    };
+  });
+
+  const selectable = evaluated
+    .filter((recommendation) => recommendation.selectable)
+    .sort((left, right) => left.surplusValue - right.surplusValue || left.coverageRatio - right.coverageRatio)
     .map((recommendation, index) => ({ ...recommendation, rank: index + 1 }));
+
+  const rejected = evaluated
+    .filter((recommendation) => !recommendation.selectable)
+    .sort((left, right) => left.cusip.localeCompare(right.cusip));
+
+  return [...selectable, ...rejected];
 }
 
 function requireRecommendation(recommendations: CollateralRecommendation[]) {
-  const recommendation = recommendations[0];
+  const recommendation = recommendations.find((item) => item.selectable);
   if (!recommendation) {
     throw new Error("No eligible collateral recommendation is visible to the investor.");
   }

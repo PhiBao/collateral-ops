@@ -1,62 +1,35 @@
-import { Activity, CheckCircle2, Eye, ListChecks, LockKeyhole, ShieldCheck, Terminal, TriangleAlert } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ClipboardCheck,
+  Eye,
+  FileText,
+  Landmark,
+  LockKeyhole,
+  Radio,
+  ShieldCheck,
+  TriangleAlert,
+  WalletCards,
+} from "lucide-react";
+import { cookies } from "next/headers";
 import { checkCantonHealth, getSnapshot } from "@/lib/canton-client";
-import { usd, shortTime } from "@/lib/format";
+import {
+  demoSessionCookieName,
+  previewSessionId,
+  readDemoSessionIdFromCookieValue,
+  readWorkflowSessionStateFromCookieValue,
+  workflowContextCookieName,
+} from "@/lib/demo-session";
+import { shortTime, usd } from "@/lib/format";
+import {
+  buildWorkflowViewModel,
+  roleCopy,
+  roleOrder,
+  visibilityLabels,
+  workflowSteps,
+} from "@/lib/workflow-view-model";
 import type { ContractKind, PartyRole, WorkflowContract, WorkflowSnapshot } from "@/lib/types";
 import { WorkflowControls } from "./workflow-controls";
-
-const roles: PartyRole[] = ["investor", "securedParty", "custodian", "auditor"];
-
-const roleCopy: Record<PartyRole, { name: string; description: string }> = {
-  investor: {
-    name: "Investor",
-    description: "Owns the tokenized Treasury position and answers margin calls.",
-  },
-  securedParty: {
-    name: "Secured Party",
-    description: "Requests collateral, accepts the pledge, then releases or seizes it.",
-  },
-  custodian: {
-    name: "Custodian",
-    description: "Locks the pledged asset and proves the position is encumbered.",
-  },
-  auditor: {
-    name: "Auditor",
-    description: "Observes the workflow without seeing every private contract.",
-  },
-};
-
-const stageCopy: Record<string, { label: string; summary: string; next: string }> = {
-  "call-open": {
-    label: "Margin call open",
-    summary: "NorthBank raised a private repo margin requirement against AtlasFund after an intraday UST move.",
-    next: "Review the deterministic collateral recommendation and submit the investor offer.",
-  },
-  "offer-posted": {
-    label: "Collateral offered",
-    summary: "AtlasFund selected a Treasury position and offered it into the pledge workflow.",
-    next: "Custodian locks the asset so it cannot be reused elsewhere.",
-  },
-  "collateral-locked": {
-    label: "Custody lock active",
-    summary: "ClearVault marked the Treasury position as encumbered on Canton.",
-    next: "Secured party accepts the locked collateral as an active pledge.",
-  },
-  "pledge-active": {
-    label: "Pledge active",
-    summary: "The collateral pledge is live and visible only to the parties allowed by the Daml model.",
-    next: "Resolve the exposure by release, or prove the default closeout path.",
-  },
-  released: {
-    label: "Collateral released",
-    summary: "The pledge was closed and the Treasury position is no longer encumbered.",
-    next: "Bootstrap a fresh workflow to run the Canton sequence again.",
-  },
-  seized: {
-    label: "Collateral seized",
-    summary: "The pledge was closed by seizure after the secured party exercised its closeout right.",
-    next: "Bootstrap a fresh workflow to run another scenario.",
-  },
-};
 
 export default async function Home({
   searchParams,
@@ -64,317 +37,546 @@ export default async function Home({
   searchParams: Promise<{ party?: PartyRole }>;
 }) {
   const params = await searchParams;
-  const activeParty = roles.includes(params.party as PartyRole) ? (params.party as PartyRole) : "investor";
-  const [snapshotResult, health] = await Promise.allSettled([getSnapshot(activeParty), checkCantonHealth()]);
+  const cookieStore = await cookies();
+  const sessionId = readDemoSessionIdFromCookieValue(cookieStore.get(demoSessionCookieName)?.value) ?? previewSessionId();
+  const persistedContext = readWorkflowSessionStateFromCookieValue(cookieStore.get(workflowContextCookieName)?.value, sessionId);
+  const activeParty = roleOrder.includes(params.party as PartyRole) ? (params.party as PartyRole) : "investor";
+  const [snapshotResult, health] = await Promise.allSettled([
+    getSnapshot(activeParty, sessionId, persistedContext),
+    checkCantonHealth(),
+  ]);
 
   if (snapshotResult.status === "rejected") {
-    return (
-      <main className="terminal-shell">
-        <header className="topbar">
-          <div className="brand">
-            <Terminal size={18} />
-            <div>
-              <strong>CollateralOps Terminal</strong>
-              <span>Canton connection required</span>
-            </div>
-          </div>
-          <div className="status-strip">
-            <Pill label="ledger" value="canton-json-api" tone="danger" />
-            <Pill label="health" value="offline" tone="danger" />
-          </div>
-        </header>
-        <section className="connection-required">
-          <h1>Connect Canton to run this app</h1>
-          <p>{snapshotResult.reason instanceof Error ? snapshotResult.reason.message : "Canton JSON Ledger API is required."}</p>
-          <pre>{`export JAVA_HOME=/home/kiter/.local/jdk-current
-export PATH="/home/kiter/.dpm/bin:$JAVA_HOME/bin:$PATH"
-cd contracts && dpm build
-dpm sandbox --json-api-port 7575 --dar .daml/dist/collateralops-0.1.0.dar
-CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
-        </section>
-      </main>
-    );
+    return <OfflineExperience reason={snapshotResult.reason} />;
   }
 
   const snapshot = snapshotResult.value;
-  const hasLiveWorkflow = snapshot.contracts.length > 0 || snapshot.receipts.length > 0;
-  const isFreshStart = !hasLiveWorkflow && snapshot.nextActions.length === 1 && snapshot.nextActions[0] === "bootstrap";
-  const currentStage = isFreshStart
-    ? {
-        label: "Ready to start",
-        summary: "No active CollateralOps workflow is loaded in this app process yet.",
-        next: "Submit Start Fresh Canton Workflow to allocate parties and create the first TreasuryPosition + MarginCall contracts.",
-      }
-    : stageCopy[snapshot.stage] ?? {
-        label: snapshot.stage,
-        summary: "Current state is loaded from the Canton active-contract set.",
-        next: "Use the available action to submit the next Canton command.",
-      };
+  const model = buildWorkflowViewModel(snapshot);
   const healthValue =
     health.status === "fulfilled"
       ? health.value
       : { healthy: false, message: health.reason instanceof Error ? health.reason.message : "Canton health check failed." };
 
   return (
-    <main className="terminal-shell">
-      <header className="topbar">
-        <div className="brand">
-          <Terminal size={18} />
-          <div>
-            <strong>CollateralOps Command Center</strong>
-            <span>private collateral mobility terminal for tokenized Treasuries</span>
-          </div>
-        </div>
-        <div className="status-strip">
-          <Pill label="ledger" value={snapshot.mode} tone="ok" />
-          <Pill label="health" value={healthValue.healthy ? "ready" : "offline"} tone={healthValue.healthy ? "ok" : "danger"} />
-          <Pill label="stage" value={snapshot.stage} tone="info" />
-          <Pill label="submission" value="2026-07-13 11:59 UTC" tone="info" />
-        </div>
-      </header>
+    <main className="app-shell">
+      <AppHeader
+        healthLabel={healthValue.healthy ? "Live Canton connection" : "Canton unavailable"}
+        healthTone={healthValue.healthy ? "ok" : "danger"}
+        stageLabel={model.stageLabel}
+        scenarioLabel={model.scenarioLabel}
+      />
 
-      <section className="workspace">
-        <aside className="rail">
-          <div className="rail-section">
-            <span className="rail-title">Party View</span>
-            {roles.map((role) => (
-              <a className={role === activeParty ? "role active" : "role"} href={`/?party=${role}`} key={role}>
+      <section className="hero-band">
+        <div className="container hero-layout">
+          <div className="hero-copy">
+            <div className="status-line">
+              <span>{model.stageLabel}</span>
+              <span>{model.proofStatus}</span>
+            </div>
+            <h1>{model.headline}</h1>
+            <p>{model.summary}</p>
+          </div>
+
+          <aside className="next-action-panel" aria-label="Next action">
+            <span>Next best action</span>
+            <strong>{model.primaryIntent}</strong>
+            <p>{model.nextActionSummary}</p>
+            <div className="assignment-row">
+              <small>Assigned to</small>
+              <b>{model.nextActorName}</b>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      {!healthValue.healthy ? <BackendWakeNotice message={healthValue.message} /> : null}
+
+      <section className="role-band">
+        <div className="container role-layout">
+          <div>
+            <span className="section-label">Viewing as</span>
+            <h2>{model.activeRoleName}</h2>
+            <p>{roleCopy[model.activeParty].description}</p>
+          </div>
+          <nav className="role-switcher" aria-label="Party view">
+            {roleOrder.map((role) => (
+              <a className={role === activeParty ? "role-tab active" : "role-tab"} href={`/?party=${role}`} key={role}>
                 <span>{roleCopy[role].name}</span>
-                <em>{roleCopy[role].description}</em>
                 <small title={snapshot.parties[role]}>{snapshot.parties[role]}</small>
               </a>
             ))}
-          </div>
+          </nav>
+        </div>
+      </section>
 
-          <div className="rail-section">
-            <span className="rail-title">Visible Contracts</span>
-            {Object.entries(snapshot.visibility).map(([kind, visible]) => (
-              <div className="visibility-row" key={kind}>
-                <span>{kind}</span>
-                <strong className={visible ? "visible" : "hidden"}>{visible ? "visible" : "hidden"}</strong>
-              </div>
-            ))}
-          </div>
-        </aside>
+      <section className="container metric-strip" aria-label="Workflow metrics">
+        <MetricCard label="Required collateral" value={model.requiredValue} helper="Minimum post-haircut value" />
+        <MetricCard label="Exposure" value={model.exposureValue} helper="Private secured-party call" />
+        <MetricCard label="Recommended coverage" value={model.recommendedCoverage} helper={model.recommendedCusip} />
+        <MetricCard label="Due" value={model.dueAt} helper="UTC workflow deadline" />
+      </section>
 
-        <section className="main-grid">
-          <Panel title="Current Canton State" eyebrow="operator briefing" variant="state">
-            <div className="explainer">
-              <div>
-                <span className="step-label">Current step</span>
-                <h1>{currentStage.label}</h1>
-                <p>{currentStage.summary}</p>
-              </div>
-              <div className="next-box">
-                <span>Next ledger action</span>
-                <strong>{currentStage.next}</strong>
-              </div>
-            </div>
-            <div className="mini-guide">
-              <GuideItem icon={<LockKeyhole size={16} />} title="Private contracts" text="Each tab queries the same Canton workflow through a different party." />
-              <GuideItem icon={<ListChecks size={16} />} title="Deterministic selection" text="Eligible UST collateral is ranked by post-haircut coverage." />
-              <GuideItem icon={<ShieldCheck size={16} />} title="Auditable commands" text="Buttons submit JSON API commands and expose offsets for proof." />
-            </div>
-          </Panel>
+      <section className="container operation-grid">
+        <section className="surface action-surface">
+          <SectionHeading
+            icon={<ClipboardCheck size={18} />}
+            title="Resolve The Call"
+            text={`Current view: ${model.activeRoleName}. Commands submit to Canton and refresh the party-scoped view.`}
+          />
+          <WorkflowControls actions={snapshot.nextActions} activeParty={activeParty} stage={snapshot.stage} />
+        </section>
 
-          <Panel title="Submit Next Canton Command" eyebrow="guided workflow" variant="command">
-            <WorkflowGraph stage={snapshot.stage} started={!isFreshStart} />
-            <WorkflowControls actions={snapshot.nextActions} activeParty={activeParty} stage={snapshot.stage} />
-          </Panel>
+        <section className="surface recommendation-surface">
+          <SectionHeading
+            icon={<WalletCards size={18} />}
+            title="Collateral Recommendation"
+            text="The app selects the eligible Treasury position with the smallest sufficient post-haircut surplus."
+          />
+          <RecommendationList snapshot={snapshot} activeParty={activeParty} />
+        </section>
 
-          <Panel title="Margin Call Blotter" eyebrow="secured exposure" variant="call">
-            {contractsOf(snapshot.contracts, "MarginCall").length === 0 ? (
-              <EmptyState text={`${roleCopy[activeParty].name} cannot currently see the private MarginCall contract.`} />
-            ) : contractsOf(snapshot.contracts, "MarginCall").map((contract) => (
-              <div className="call-card" key={contract.id}>
-                <div>
-                  <strong>{contract.id}</strong>
-                  <p>{contract.reason}</p>
-                </div>
-                <div className="metric-row">
-                  <Metric label="Required" value={usd(contract.requiredValue)} />
-                  <Metric label="Exposure" value={usd(contract.counterpartyExposure)} />
-                  <Metric label="Min haircut" value={`${contract.minimumHaircutPct}%`} />
-                  <Metric label="Due" value={shortTime(contract.dueDate)} />
-                </div>
-              </div>
-            ))}
-          </Panel>
+        <section className="surface timeline-surface">
+          <SectionHeading
+            icon={<ShieldCheck size={18} />}
+            title="Private Handoff Timeline"
+            text="Each step has a different controller, so the workflow reads like operations rather than a ledger console."
+          />
+          <WorkflowTimeline snapshot={snapshot} started={!model.isFreshStart} />
+        </section>
 
-          <Panel title="Collateral Recommendation" eyebrow="optimizer" variant="recommendation">
-            {snapshot.recommendations.length === 0 ? (
-              <EmptyState text={`${roleCopy[activeParty].name} cannot currently see enough call and inventory data for a recommendation.`} />
-            ) : snapshot.recommendations.map((recommendation) => (
-              <article className="recommendation" key={recommendation.positionId}>
-                <div className="recommendation-top">
-                  <span>Rank {recommendation.rank}</span>
-                  <strong>{recommendation.cusip}</strong>
-                </div>
-                <p>{recommendation.rationale}</p>
-                <div className="metric-row two">
-                  <Metric label="Pledge amount" value={usd(recommendation.pledgeAmount)} />
-                  <Metric label="Coverage" value={`${Math.round(recommendation.coverageRatio * 100)}%`} />
-                </div>
-              </article>
-            ))}
-          </Panel>
+        <section className="surface privacy-surface">
+          <SectionHeading
+            icon={<Eye size={18} />}
+            title="Party Privacy View"
+            text="The visible evidence changes by party, while the workflow state remains shared."
+          />
+          <PrivacyMatrix visibility={snapshot.visibility} />
+        </section>
 
-          <Panel title="Tokenized UST Inventory" eyebrow="investor and custodian" variant="inventory">
-            <div className="table">
-              <div className="table-head">
-                <span>CUSIP</span>
-                <span>Issuer</span>
-                <span>Market Value</span>
-                <span>Post-Haircut</span>
-                <span>State</span>
-              </div>
-              {contractsOf(snapshot.contracts, "TreasuryPosition").length === 0 ? (
-                <div className="table-empty">This party cannot see the TreasuryPosition contract.</div>
-              ) : contractsOf(snapshot.contracts, "TreasuryPosition").map((contract) => (
-                <div className="table-row" key={contract.id}>
-                  <span>{contract.cusip}</span>
-                  <span>{contract.issuer}</span>
-                  <span>{usd(contract.marketValue)}</span>
-                  <span>{usd(contract.postHaircutValue)}</span>
-                  <span className="state">{contract.encumbrance}</span>
-                </div>
-              ))}
-            </div>
-            {contractsOf(snapshot.contracts, "TreasuryPosition").map((contract) => (
-              <div className="risk-note" key={`${contract.id}-risk`}>
-                <TriangleAlert size={14} />
-                <span>{contract.liquidityTier} · matures {contract.maturityDate} · {contract.riskNotes}</span>
-              </div>
-            ))}
-          </Panel>
+        <section className="surface call-surface">
+          <SectionHeading
+            icon={<Landmark size={18} />}
+            title="Margin Call Brief"
+            text="A finance operator gets the reason, requirement, haircut, and due time without reading raw contract JSON."
+          />
+          <MarginCallBrief snapshot={snapshot} activeParty={activeParty} />
+        </section>
 
-          <Panel title="Audit Evidence Feed" eyebrow="restricted observer trail" variant="evidence">
-            <div className="feed">
-              {snapshot.receipts.length === 0 ? (
-                <EmptyState text="No audit receipt is visible to this party yet." />
-              ) : snapshot.receipts.map((receipt) => (
-                <article className="receipt" key={receipt.id}>
-                  <span>{shortTime(receipt.timestamp)}</span>
-                  <strong>{receipt.action} · {receipt.actor}</strong>
-                  <p>{receipt.summary}</p>
-                </article>
-              ))}
-            </div>
-          </Panel>
+        <section className="surface inventory-surface">
+          <SectionHeading
+            icon={<LockKeyhole size={18} />}
+            title="Tokenized Treasury Inventory"
+            text="The asset state shows whether collateral is free, offered, locked, pledged, released, or seized."
+          />
+          <Inventory snapshot={snapshot} activeParty={activeParty} />
+        </section>
 
-          <Panel title="Canton Proof Drawer" eyebrow="json api evidence" variant="proof">
-            <div className="proof-grid">
-              <Metric label="Offset" value={snapshot.proof.activeAtOffset ?? "not bootstrapped"} />
-              <Metric label="Visible contracts" value={String(snapshot.proof.visibleContractCount)} />
-            </div>
-            <div className="proof-query">
-              <Activity size={15} />
-              <span>{snapshot.proof.partyScopedQuery}</span>
-            </div>
-            <div className="template-list">
-              {snapshot.proof.visibleTemplateIds.length === 0 ? (
-                <span>No visible Canton templates at this offset.</span>
-              ) : snapshot.proof.visibleTemplateIds.map((templateId) => <code key={templateId}>{templateId}</code>)}
-            </div>
-          </Panel>
+        <section className="surface evidence-surface">
+          <SectionHeading
+            icon={<FileText size={18} />}
+            title="Audit Evidence"
+            text="Receipts are readable first, with offsets and templates available for proof."
+          />
+          <EvidenceFeed snapshot={snapshot} activeParty={activeParty} />
+        </section>
 
-          <Panel title="Active Contracts" eyebrow="party-scoped ledger view" variant="contracts" wide>
-            <div className="contract-grid">
-              {snapshot.contracts.length === 0 ? (
-                <EmptyState text="This party has no visible active contracts at the current ledger offset." />
-              ) : snapshot.contracts.map((contract) => (
-                <pre className="contract" key={contract.id}>
-                  {JSON.stringify(contract, null, 2)}
-                </pre>
-              ))}
-            </div>
-          </Panel>
+        <section className="surface proof-surface">
+          <SectionHeading
+            icon={<Radio size={18} />}
+            title="Technical Proof"
+            text="Reviewer-facing Canton details stay available without taking over the product workflow."
+          />
+          <ProofDrawer snapshot={snapshot} />
         </section>
       </section>
     </main>
   );
 }
 
-function GuideItem({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
+function BackendWakeNotice({ message }: { message: string }) {
   return (
-    <div className="guide-item">
-      {icon}
+    <section className="container backend-wake-notice" aria-live="polite">
       <div>
-        <strong>{title}</strong>
-        <span>{text}</span>
+        <TriangleAlert size={18} aria-hidden="true" />
+        <div>
+          <strong>Canton backend is not ready yet.</strong>
+          <p>{message}</p>
+        </div>
       </div>
-    </div>
-  );
-}
-
-function Panel({
-  title,
-  eyebrow,
-  children,
-  wide = false,
-  variant,
-}: {
-  title: string;
-  eyebrow?: string;
-  children: React.ReactNode;
-  wide?: boolean;
-  variant?: string;
-}) {
-  return (
-    <section className={["panel", wide ? "wide" : "", variant ? `${variant}-panel` : ""].filter(Boolean).join(" ")}>
-      <div className="panel-title">
-        {eyebrow ? <span>{eyebrow}</span> : null}
-        <h2>{title}</h2>
-      </div>
-      {children}
+      <a href="/">Retry connection</a>
     </section>
   );
 }
 
-function Pill({ label, value, tone }: { label: string; value: string; tone: "ok" | "warn" | "danger" | "info" }) {
+function AppHeader({
+  healthLabel,
+  healthTone,
+  stageLabel,
+  scenarioLabel,
+}: {
+  healthLabel: string;
+  healthTone: "ok" | "danger";
+  stageLabel: string;
+  scenarioLabel?: string;
+}) {
   return (
-    <div className={`pill ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <header className="app-header">
+      <a className="brand-mark" href="/" aria-label="CollateralOps home">
+        <span>
+          <Landmark size={20} />
+        </span>
+        <div>
+          <strong>CollateralOps</strong>
+          <small>Private collateral resolution</small>
+        </div>
+      </a>
+      <div className="header-status">
+        <StatusBadge label={healthLabel} tone={healthTone} />
+        <StatusBadge label={stageLabel} tone="neutral" />
+        {scenarioLabel ? <StatusBadge label={scenarioLabel} tone="neutral" /> : null}
+      </div>
+    </header>
+  );
+}
+
+function OfflineExperience({ reason }: { reason: unknown }) {
+  return (
+    <main className="app-shell offline-shell">
+      <AppHeader healthLabel="Canton unavailable" healthTone="danger" stageLabel="Setup required" />
+      <section className="hero-band">
+        <div className="container offline-layout">
+          <div className="hero-copy">
+            <div className="status-line">
+              <span>Read-only preview</span>
+              <span>No live proof</span>
+            </div>
+            <h1>Connect Canton to run the private collateral workflow.</h1>
+            <p>
+              CollateralOps needs the Canton JSON Ledger API before it can create parties, submit commands, or display
+              live party-scoped evidence.
+            </p>
+            <div className="offline-error">
+              <AlertCircle size={18} />
+              <span>{reason instanceof Error ? reason.message : "Canton JSON Ledger API is required."}</span>
+            </div>
+          </div>
+
+          <aside className="setup-panel" aria-label="Setup commands">
+            <span>Setup checklist</span>
+            <ol>
+              <li>Build the Daml archive.</li>
+              <li>Start a local sandbox with JSON API.</li>
+              <li>
+                Run the Next.js app with <code>CANTON_JSON_API_URL</code> set.
+              </li>
+            </ol>
+            <pre>{`export JAVA_HOME=/home/kiter/.local/jdk-current
+export PATH="/home/kiter/.dpm/bin:$JAVA_HOME/bin:$PATH"
+cd contracts && dpm build
+dpm sandbox --json-api-port 7575 --dar .daml/dist/collateralops-0.1.0.dar
+CANTON_JSON_API_URL=http://localhost:7575 pnpm dev`}</pre>
+          </aside>
+        </div>
+      </section>
+
+      <section className="container preview-grid" aria-label="Read-only workflow preview">
+        <PreviewStep title="Margin call" text="NorthBank raises a private repo margin requirement against AtlasFund." />
+        <PreviewStep title="Recommendation" text="CollateralOps selects the eligible Treasury position with the least excess pledge." />
+        <PreviewStep title="Custody lock" text="ClearVault locks the asset so it cannot be reused during the pledge." />
+        <PreviewStep title="Audit evidence" text="RegSight sees restricted evidence without a public global ledger view." />
+      </section>
+    </main>
+  );
+}
+
+function SectionHeading({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
+  return (
+    <div className="section-heading">
+      <span>{icon}</span>
+      <div>
+        <h2>{title}</h2>
+        <p>{text}</p>
+      </div>
     </div>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function RecommendationList({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
+  if (snapshot.recommendations.length === 0) {
+    return (
+      <EmptyState
+        title="Recommendation not visible"
+        text={`${roleCopy[activeParty].name} cannot currently see enough call and inventory data for a recommendation.`}
+      />
+    );
+  }
+
   return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="recommendation-list">
+      {snapshot.recommendations.map((recommendation) => (
+        <article className={recommendation.selectable ? "recommendation-item" : "recommendation-item rejected"} key={recommendation.positionId}>
+          <div>
+            <span>{recommendation.selectable ? `Rank ${recommendation.rank}` : "Rejected"}</span>
+            <strong>{recommendation.cusip}</strong>
+          </div>
+          <p>{recommendation.rationale}</p>
+          <p>{recommendation.selectionReason}</p>
+          <div className="mini-metrics">
+            <MetricInline label="Pledge amount" value={usd(recommendation.pledgeAmount)} />
+            <MetricInline label="Coverage" value={`${Math.round(recommendation.coverageRatio * 100)}%`} />
+            <MetricInline label="Surplus" value={usd(Math.max(0, recommendation.surplusValue))} />
+          </div>
+          {recommendation.rejectionReasons.length > 0 ? (
+            <ul className="warning-list">
+              {recommendation.rejectionReasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          ) : null}
+        </article>
+      ))}
     </div>
   );
 }
 
-function EmptyState({ text }: { text: string }) {
-  return <div className="empty-state">{text}</div>;
+function WorkflowTimeline({ snapshot, started }: { snapshot: WorkflowSnapshot; started: boolean }) {
+  return (
+    <ol className="timeline">
+      {workflowSteps(snapshot.stage, started).map((step) => (
+        <li className={`timeline-step ${step.state}`} key={step.key}>
+          <span aria-hidden="true">{step.state === "complete" ? <CheckCircle2 size={16} /> : null}</span>
+          <div>
+            <strong>{step.label}</strong>
+            <small>{step.actor}</small>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
-function WorkflowGraph({ stage, started }: { stage: string; started: boolean }) {
-  const nodes = [
-    ["call-open", "Margin Call"],
-    ["offer-posted", "Offer"],
-    ["collateral-locked", "Custody Lock"],
-    ["pledge-active", "Accepted Pledge"],
-    ["released", "Release"],
-    ["seized", "Default"],
-  ];
-
-  const currentIndex = nodes.findIndex(([key]) => key === stage);
-  const activeIndex = started ? Math.max(0, currentIndex === -1 ? 4 : currentIndex) : -1;
-
+function PrivacyMatrix({ visibility }: { visibility: Record<ContractKind, boolean> }) {
   return (
-    <div className="flow">
-      {nodes.map(([key, label], index) => (
-        <div className={index <= activeIndex ? "flow-node active" : "flow-node"} key={key}>
-          <span>{index + 1}</span>
-          <strong>{label}</strong>
+    <div className="privacy-list">
+      {Object.entries(visibility).map(([kind, visible]) => (
+        <div className="privacy-row" key={kind}>
+          <span>{visibilityLabels[kind as ContractKind]}</span>
+          <strong className={visible ? "visible" : "hidden"}>{visible ? "Visible" : "Hidden"}</strong>
         </div>
       ))}
     </div>
+  );
+}
+
+function MarginCallBrief({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
+  const calls = contractsOf(snapshot.contracts, "MarginCall");
+  const terms = contractsOf(snapshot.contracts, "ExposureTerms");
+
+  if (calls.length === 0) {
+    return (
+      <EmptyState
+        title="Margin call hidden"
+        text={`${roleCopy[activeParty].name} cannot currently see the private MarginCall contract.`}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="brief-list">
+        {calls.map((contract) => (
+          <article className="brief-item" key={contract.id}>
+            <strong>{contract.reason}</strong>
+            <div className="mini-metrics four">
+              <MetricInline label="Required" value={usd(contract.requiredValue)} />
+              <MetricInline label="Exposure" value={usd(contract.counterpartyExposure)} />
+              <MetricInline label="Min haircut" value={`${contract.minimumHaircutPct}%`} />
+              <MetricInline label="Due" value={shortTime(contract.dueDate)} />
+            </div>
+          </article>
+        ))}
+      </div>
+      <div className="brief-list terms-list">
+        {terms.length > 0 ? (
+          terms.map((contract) => (
+            <article className="brief-item private-terms" key={contract.id}>
+              <strong>Private exposure terms</strong>
+              <div className="mini-metrics">
+                <MetricInline label="Valuation source" value={contract.valuationSource} />
+                <MetricInline label="Dispute window" value={`${contract.disputeWindowHours}h`} />
+                <MetricInline label="Closeout threshold" value={`${contract.closeoutThresholdPct}%`} />
+              </div>
+              <p>{contract.sensitiveNote}</p>
+            </article>
+          ))
+        ) : (
+          <EmptyState
+            title="Private terms hidden"
+            text={`${roleCopy[activeParty].name} cannot see the bilateral exposure terms contract.`}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function Inventory({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
+  const positions = contractsOf(snapshot.contracts, "TreasuryPosition");
+
+  if (positions.length === 0) {
+    return (
+      <EmptyState
+        title="Inventory hidden"
+        text={`${roleCopy[activeParty].name} cannot currently see the TreasuryPosition contract.`}
+      />
+    );
+  }
+
+  return (
+    <div className="inventory-list">
+      {positions.map((contract) => (
+        <article className="inventory-item" key={contract.id}>
+          <div>
+            <strong>{contract.cusip}</strong>
+            <span>{contract.issuer}</span>
+          </div>
+          <div className="mini-metrics four">
+            <MetricInline label="Market value" value={usd(contract.marketValue)} />
+            <MetricInline label="Post-haircut" value={usd(contract.postHaircutValue)} />
+            <MetricInline label="Haircut" value={`${contract.haircutPct}%`} />
+            <MetricInline label="State" value={contract.encumbrance} />
+          </div>
+          <p className="risk-note">
+            <TriangleAlert size={15} />
+            <span>
+              {contract.liquidityTier} collateral, matures {contract.maturityDate}. {contract.riskNotes}
+            </span>
+          </p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function EvidenceFeed({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
+  if (snapshot.receipts.length === 0) {
+    return (
+      <EmptyState title="No receipt visible" text={`No audit receipt is visible to ${roleCopy[activeParty].name} yet.`} />
+    );
+  }
+
+  return (
+    <div className="feed">
+      {snapshot.receipts.map((receipt) => (
+        <article className="feed-item" key={receipt.id}>
+          <time>{shortTime(receipt.timestamp)}</time>
+          <strong>
+            {receipt.action} by {roleCopy[receipt.actor].name}
+          </strong>
+          <p>{receipt.summary}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ProofDrawer({ snapshot }: { snapshot: WorkflowSnapshot }) {
+  return (
+    <div className="proof-stack">
+      <div className="mini-metrics">
+        <MetricInline label="Offset" value={snapshot.proof.activeAtOffset ?? "Not bootstrapped"} />
+        <MetricInline label="Visible contracts" value={String(snapshot.proof.visibleContractCount)} />
+      </div>
+      <div className="proof-query">
+        <Radio size={15} />
+        <span>{snapshot.proof.partyScopedQuery}</span>
+      </div>
+      <PartyProofMatrix snapshot={snapshot} />
+      <details className="proof-disclosure">
+        <summary>Canton templates and active contracts</summary>
+        <div className="template-list">
+          {snapshot.proof.visibleTemplateIds.length === 0 ? (
+            <span>No visible Canton templates at this offset.</span>
+          ) : (
+            snapshot.proof.visibleTemplateIds.map((templateId) => <code key={templateId}>{templateId}</code>)
+          )}
+        </div>
+        <div className="contract-grid">
+          {snapshot.contracts.length === 0 ? (
+            <EmptyState title="No active contracts" text="This party has no visible active contracts at the current ledger offset." />
+          ) : (
+            snapshot.contracts.map((contract) => (
+              <pre className="contract" key={contract.id}>
+                {JSON.stringify(contract, null, 2)}
+              </pre>
+            ))
+          )}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function PartyProofMatrix({ snapshot }: { snapshot: WorkflowSnapshot }) {
+  return (
+    <div className="party-proof-grid" aria-label="Party visibility proof">
+      {snapshot.proof.partyVisibility.map((proof) => (
+        <div className="party-proof-row" key={proof.role}>
+          <div>
+            <strong>{roleCopy[proof.role].name}</strong>
+            <small title={proof.party}>{proof.party}</small>
+          </div>
+          <MetricInline label="Visible contracts" value={String(proof.visibleContractCount)} />
+          <MetricInline label="Private terms" value={proof.seesPrivateTerms ? "Visible" : "Hidden"} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MetricCard({ label, value, helper }: { label: string; value: string; helper: string }) {
+  return (
+    <div className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{helper}</small>
+    </div>
+  );
+}
+
+function MetricInline({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric-inline">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function StatusBadge({ label, tone }: { label: string; tone: "ok" | "danger" | "neutral" }) {
+  return (
+    <span className={`status-badge ${tone}`}>
+      <span aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+function EmptyState({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="empty-state">
+      <strong>{title}</strong>
+      <span>{text}</span>
+    </div>
+  );
+}
+
+function PreviewStep({ title, text }: { title: string; text: string }) {
+  return (
+    <article className="preview-step">
+      <strong>{title}</strong>
+      <p>{text}</p>
+    </article>
   );
 }
 

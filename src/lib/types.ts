@@ -2,6 +2,8 @@ export type PartyRole = "investor" | "securedParty" | "custodian" | "auditor";
 
 export type LedgerMode = "canton-json-api";
 
+export type WorkflowScenario = "standard" | "default-risk" | "undercovered";
+
 export type WorkflowStage =
   | "call-open"
   | "offer-posted"
@@ -13,6 +15,7 @@ export type WorkflowStage =
 export type ContractKind =
   | "TreasuryPosition"
   | "MarginCall"
+  | "ExposureTerms"
   | "CollateralOffer"
   | "LockedCollateral"
   | "ActivePledge"
@@ -24,6 +27,13 @@ export interface PartyDirectory {
   securedParty: string;
   custodian: string;
   auditor: string;
+}
+
+export interface WorkflowSessionState {
+  parties?: PartyDirectory;
+  activeAtOffset?: number;
+  scenario?: WorkflowScenario;
+  lastAction?: WorkflowAction;
 }
 
 export interface TreasuryPosition {
@@ -59,6 +69,17 @@ export interface MarginCall {
   minimumHaircutPct: number;
   dueDate: string;
   status: WorkflowStage;
+}
+
+export interface ExposureTerms {
+  id: string;
+  kind: "ExposureTerms";
+  securedParty: string;
+  investor: string;
+  valuationSource: string;
+  disputeWindowHours: number;
+  closeoutThresholdPct: number;
+  sensitiveNote: string;
 }
 
 export interface CollateralOffer {
@@ -134,6 +155,7 @@ export interface PledgeCloseout {
 export type WorkflowContract =
   | TreasuryPosition
   | MarginCall
+  | ExposureTerms
   | CollateralOffer
   | LockedCollateral
   | ActivePledge
@@ -145,6 +167,8 @@ export interface WorkflowSnapshot {
   activeParty: PartyRole;
   parties: PartyDirectory;
   stage: WorkflowStage;
+  scenario: WorkflowScenario;
+  sessionScoped: boolean;
   contracts: WorkflowContract[];
   receipts: AuditReceipt[];
   recommendations: CollateralRecommendation[];
@@ -161,9 +185,22 @@ export interface CollateralRecommendation {
   pledgeAmount: number;
   postHaircutValue: number;
   coverageRatio: number;
+  surplusValue: number;
   rank: number;
+  selectable: boolean;
+  selectionReason: string;
   rationale: string;
   warnings: string[];
+  rejectionReasons: string[];
+}
+
+export interface PartyVisibilityProof {
+  role: PartyRole;
+  party: string;
+  visibleContractCount: number;
+  visibleTemplateIds: string[];
+  seesPrivateTerms: boolean;
+  hiddenSensitiveTemplates: string[];
 }
 
 export interface CantonProof {
@@ -171,6 +208,9 @@ export interface CantonProof {
   visibleContractCount: number;
   visibleTemplateIds: string[];
   partyScopedQuery: string;
+  partyVisibility: PartyVisibilityProof[];
+  lastAction?: WorkflowAction;
+  scenario: WorkflowScenario;
 }
 
 export type WorkflowAction = "bootstrap" | "offer" | "lock" | "accept" | "release" | "seize" | "default";
@@ -180,6 +220,7 @@ export interface WorkflowResult {
   mode: LedgerMode;
   action: WorkflowAction;
   stage: WorkflowStage;
+  scenario: WorkflowScenario;
   updateId?: string;
   message: string;
 }
@@ -194,4 +235,7 @@ export interface CantonContract {
   contractId: string;
   templateId: string;
   payload: Record<string, unknown>;
+  witnessParties?: string[];
+  signatories?: string[];
+  observers?: string[];
 }
