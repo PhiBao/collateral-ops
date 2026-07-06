@@ -1,17 +1,16 @@
 # Live Product Guide
 
-This is the deployment path for the hackathon preview:
+This is the deployment path for the hackathon preview.
 
 ```text
 Vercel
   Next.js product UI and API routes
 
-Render
-  Docker web service running the Canton sandbox JSON API
-
-GitHub Actions
-  Scheduled keep-awake ping for the Render preview backend
+Your local machine (or any 1GB+ RAM server)
+  Canton sandbox JSON API → exposed via Cloudflare Tunnel / ngrok
 ```
+
+Render's free tier (512MB) can't run Canton — it OOMs. Self-hosted Canton + Vercel UI is the recommended approach.
 
 The app is still a product preview, not production collateral infrastructure. The goal is to give judges a stable live link that proves the Canton workflow end to end.
 
@@ -29,27 +28,14 @@ Use Vercel for:
 
 Do not use Vercel for the long-running Canton process. Vercel functions are request scoped; Canton needs a long-lived service.
 
-### Render
+### Self-hosted Canton (local machine / server)
 
-Use Render for:
+Use your own machine for:
 
-- the Docker service defined by `Dockerfile.canton`
-- the Canton sandbox JSON Ledger API
+- Canton sandbox JSON Ledger API
 - the `/livez` health endpoint consumed by Vercel
 
-The Render service is a preview backend. Free Render instances can sleep after inactivity, so the UI includes a backend-waking notice and the repo includes a scheduled keep-awake workflow.
-
-## Files Added For Deployment
-
-```text
-Dockerfile.canton
-render.yaml
-render/start-canton.sh
-render/canton-proxy.mjs
-.github/workflows/keep-render-awake.yml
-```
-
-The Render service starts Canton on an internal port and exposes Render's required `$PORT` through a small Node HTTP proxy. This avoids depending on Canton binding directly to Render's web-service port.
+Canton needs ~1GB RAM minimum. Any Linux machine with Java 21 will do.
 
 ## 1. Prepare The Repo
 
@@ -60,43 +46,11 @@ pnpm check
 cd contracts && dpm build && dpm test
 ```
 
-Commit the deployment files, app code, Daml contracts, and guides.
+Commit everything.
 
-Do not commit `.env`, `.env.local`, `.next`, `node_modules`, or `contracts/.daml`.
+Do not commit `.env`, `.env.local`, `.next`, `node_modules`.
 
-## 2. Deploy The Canton Backend To Render
-
-Recommended: create a new Render Blueprint from `render.yaml`.
-
-Manual equivalent:
-
-```text
-Service type: Web Service
-Runtime: Docker
-Dockerfile path: ./Dockerfile.canton
-Health check path: /livez
-Plan: free for preview, paid if you need fewer cold starts
-```
-
-Render environment variables:
-
-```text
-CANTON_JSON_PORT=7575
-```
-
-Render injects `PORT`. Do not set `PORT` manually unless Render asks you to.
-
-After deployment, verify:
-
-```bash
-curl -fsS https://YOUR-RENDER-SERVICE.onrender.com/livez
-```
-
-Expected result: HTTP 200 with an empty body from Canton once the sandbox is ready. During cold start, the proxy may return a temporary JSON `503` saying Canton is starting.
-
-If the Render build fails because the Daml installer provides `daml` but not `dpm`, use the fallback in `Dockerfile.canton`: it already tries `dpm build` first and then `daml build`. If both are missing, install a pinned DPM-capable image/cache before the `cd contracts && ... build` step.
-
-## 3. Deploy The App To Vercel
+## 2. Deploy The App To Vercel
 
 Create a new Vercel project from the GitHub repo.
 
@@ -112,139 +66,103 @@ Output directory: default
 Set Vercel environment variables:
 
 ```text
-CANTON_JSON_API_URL=https://YOUR-RENDER-SERVICE.onrender.com
-DEMO_ACCESS_KEY=choose-a-short-demo-key
+CANTON_JSON_API_URL=https://your-tunnel-url
+DEMO_ACCESS_KEY=demo
 DEMO_SESSION_SECRET=choose-a-long-random-secret
+LLM_API_KEY=sk-your-dgrid-key         ← optional
+LLM_MODEL=openai/gpt-4o
 CANTON_HEALTH_TIMEOUT_MS=8000
 CANTON_REQUEST_TIMEOUT_MS=25000
 ```
 
-`DEMO_ACCESS_KEY` protects workflow-changing routes. `DEMO_SESSION_SECRET` signs session and workflow-context cookies so Vercel can resume a demo across serverless requests.
+`CANTON_JSON_API_URL` should point to your tunnel URL (see step 4). You'll update this after creating the tunnel.
 
-Deploy, then verify:
+## 3. Start Canton Sandbox Locally
+
+```bash
+pnpm dev:canton
+# or manually:
+export JAVA_HOME=/path/to/jdk-21
+export PATH="/home/you/.dpm/bin:$JAVA_HOME/bin:$PATH"
+cd contracts && dpm build && dpm sandbox --json-api-port 7575 --dar .daml/dist/collateralops-0.1.0.dar
+```
+
+Verify:
+
+```bash
+curl -fsS http://localhost:7575/livez
+```
+
+Expected: HTTP 200 with empty body.
+
+## 4. Create A Tunnel
+
+Pick one:
+
+**Cloudflare Tunnel** (free, needs `cloudflared`):
+```bash
+cloudflared tunnel --url http://localhost:7575
+# → https://radiant-topic-gb.trycloudflare.com
+```
+
+**ngrok** (free, needs `ngrok` account):
+```bash
+ngrok http 7575
+# → https://xxxx-71-19-2.ngrok-free.app
+```
+
+**localtunnel** (free, no account):
+```bash
+npx localtunnel --port 7575
+# → https://xxxx.loca.lt
+```
+
+Copy the tunnel URL. Go into Vercel project settings → Environment Variables → Update `CANTON_JSON_API_URL` to the tunnel URL → Redeploy.
+
+## 5. Verify
 
 ```bash
 curl -fsS https://YOUR-VERCEL-APP.vercel.app/api/status
+# → {"mode":"canton-json-api","healthy":true,...}
 ```
 
-## 4. Configure Keep-Awake
-
-GitHub Actions workflow:
-
-```text
-.github/workflows/keep-render-awake.yml
-```
-
-Add this GitHub secret:
-
-```text
-RENDER_KEEPALIVE_URL=https://YOUR-RENDER-SERVICE.onrender.com
-```
-
-The workflow pings:
-
-```text
-https://YOUR-RENDER-SERVICE.onrender.com/livez
-```
-
-Schedule:
-
-```text
-*/10 * * * *
-```
-
-That is intentionally below Render's free-instance idle window. GitHub scheduled workflows are not real-time infrastructure, so still expect occasional cold starts. The UI handles this with a Canton backend warming notice.
-
-## 5. Run The Remote Proof
-
-Standard release path:
-
-```bash
-APP_URL=https://YOUR-VERCEL-APP.vercel.app \
-CANTON_JSON_API_URL=https://YOUR-RENDER-SERVICE.onrender.com \
-DEMO_ACCESS_KEY=choose-a-short-demo-key \
-./scripts/canton-json-proof.sh
-```
-
-Fallback-collateral scenario:
-
-```bash
-SCENARIO=undercovered \
-APP_URL=https://YOUR-VERCEL-APP.vercel.app \
-CANTON_JSON_API_URL=https://YOUR-RENDER-SERVICE.onrender.com \
-DEMO_ACCESS_KEY=choose-a-short-demo-key \
-./scripts/canton-json-proof.sh
-```
-
-Default/seizure path:
-
-```bash
-CLOSEOUT_ACTION=default \
-APP_URL=https://YOUR-VERCEL-APP.vercel.app \
-CANTON_JSON_API_URL=https://YOUR-RENDER-SERVICE.onrender.com \
-DEMO_ACCESS_KEY=choose-a-short-demo-key \
-./scripts/canton-json-proof.sh
-```
-
-What to confirm in the output:
-
-- `stage":"released"` appears in the release path.
-- `scenario":"undercovered"` appears in the fallback run.
-- rejected recommendations include `rejectionReasons`.
-- `stage":"seized"` or `finalStatus":"seized"` appears in the default run.
-- party visibility marks `ExposureTerms` visible to investor/secured party and hidden from custodian/auditor.
+Visit the app, enter demo access key `demo`, and run the weekend-stress scenario.
 
 ## 6. Judge Demo Flow
 
 1. Open the Vercel URL.
-2. If the header says Canton unavailable, wait for the Render backend warming notice to clear and click `Retry connection`.
-3. Enter the demo access key when prompted.
-4. Choose `Fallback` if you want the strongest product story.
+2. If the header says Canton unavailable, check your tunnel and local sandbox.
+3. Enter the demo access key when prompted (`demo`).
+4. Choose `Weekend Stress`.
 5. Start workflow.
-6. Show the recommendation panel rejecting three assets and selecting the fallback Treasury.
-7. Drive offer, lock, accept, and release/default.
+6. Show the recommendation panel.
+7. Drive offer → lock → **settle (atomic DvP)** → release.
 8. Open Technical Proof and Party Proof Matrix.
+9. Switch to auditor — show the CantSeePanel and "Cash leg: Hidden" in proof matrix.
+10. Click "Ask agent to decide next step."
 
 ## 7. Failure Handling
 
 ### Vercel says Canton unavailable
 
-Check:
+Check that your local Canton sandbox and tunnel are running:
 
 ```bash
-curl -i https://YOUR-RENDER-SERVICE.onrender.com/livez
+curl -i https://YOUR-TUNNEL-URL/livez
 curl -i https://YOUR-VERCEL-APP.vercel.app/api/status
 ```
 
-If Render is cold, the first request may wake it. Wait 30-90 seconds and retry.
+If your machine sleeps or the tunnel disconnects, the app shows "Canton backend is not ready yet."
 
 ### Workflow resets after refresh
 
-This should be fixed by signed workflow-context cookies. Check that Vercel has:
+This is fixed by signed workflow-context cookies. Check that Vercel has:
 
 ```text
 DEMO_SESSION_SECRET
 ```
 
 If that secret changes between deployments, old demo cookies become invalid and users should open a new demo session.
-
-### Mutation routes are public
-
-Set:
-
-```text
-DEMO_ACCESS_KEY
-```
-
-Then verify unauthenticated mutation fails:
-
-```bash
-curl -i -X POST https://YOUR-VERCEL-APP.vercel.app/api/workflow/bootstrap \
-  -H "Content-Type: application/json" \
-  -d '{"scenario":"standard"}'
-```
-
-Expected: `401 demo_session_required`.
 
 ## 8. Production Caveats
 
@@ -271,7 +189,5 @@ CollateralOps is a live Canton-backed product preview for private tokenized Trea
 
 - Vercel Next.js deployments: https://vercel.com/docs/frameworks/nextjs
 - Vercel environment variables: https://vercel.com/docs/environment-variables
-- Render web services: https://render.com/docs/web-services
-- Render Docker services: https://render.com/docs/docker
-- Render free instance behavior: https://render.com/docs/free
-- GitHub scheduled workflows: https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
+- Cloudflare Tunnel: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps
+- ngrok: https://ngrok.com
