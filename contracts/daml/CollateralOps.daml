@@ -7,6 +7,7 @@ data CallStatus
   | OfferPosted
   | CollateralLocked
   | PledgeActive
+  | Settled
   | Released
   | Seized
   deriving (Eq, Show)
@@ -20,6 +21,17 @@ data WorkflowSetup = WorkflowSetup
     position : ContractId TreasuryPosition
     call : ContractId MarginCall
     terms : ContractId ExposureTerms
+
+data AtomicSetup = AtomicSetup
+  with
+    investor : Party
+    securedParty : Party
+    custodian : Party
+    auditor : Party
+    position : ContractId TreasuryPosition
+    call : ContractId MarginCall
+    terms : ContractId ExposureTerms
+    cash : ContractId TokenizedCash
 
 template TreasuryPosition
   with
@@ -39,6 +51,29 @@ template TreasuryPosition
     signatory investor, custodian
     observer auditor
     ensure faceValue > 0.0 && marketValue > 0.0
+
+template TokenizedCash
+  with
+    issuer : Party
+    holder : Party
+    amount : Decimal
+    currency : Text
+    eligible : Bool
+  where
+    signatory issuer
+    observer holder
+    ensure amount > 0.0
+
+template CashTransfer
+  with
+    from : Party
+    to : Party
+    amount : Decimal
+    currency : Text
+  where
+    signatory from
+    observer to
+    ensure amount > 0.0
 
 template MarginCall
   with
@@ -164,6 +199,35 @@ template LockedCollateral
           recommendationNote
           terminalStatus = PledgeActive
 
+    choice SettleRepo : ContractId ActivePledge
+      with
+        cashCid : ContractId TokenizedCash
+      controller securedParty
+      do
+        cash <- fetch cashCid
+        assertMsg "cash issuer must be the secured party" (cash.issuer == securedParty)
+        assertMsg "cash must be eligible" cash.eligible
+        assertMsg "cash currency must match collateral currency" (cash.currency == currency)
+        assertMsg "cash amount must cover locked value" (cash.amount >= lockedValue)
+
+        create CashTransfer with
+          from = securedParty
+          to = investor
+          amount = lockedValue
+          currency
+
+        create ActivePledge with
+          securedParty
+          investor
+          custodian
+          auditor
+          positionCid
+          pledgedValue = lockedValue
+          haircutPct
+          currency
+          recommendationNote
+          terminalStatus = Settled
+
 template ActivePledge
   with
     securedParty : Party
@@ -184,7 +248,7 @@ template ActivePledge
     choice ReleaseCollateral : ContractId PledgeCloseout
       controller securedParty
       do
-        assertMsg "pledge must be active" (terminalStatus == PledgeActive)
+        assertMsg "pledge must be active or settled" (terminalStatus == PledgeActive || terminalStatus == Settled)
         create PledgeCloseout with
           securedParty
           investor
@@ -198,7 +262,7 @@ template ActivePledge
     choice SeizeCollateral : ContractId PledgeCloseout
       controller securedParty
       do
-        assertMsg "pledge must be active" (terminalStatus == PledgeActive)
+        assertMsg "pledge must be active or settled" (terminalStatus == PledgeActive || terminalStatus == Settled)
         create PledgeCloseout with
           securedParty
           investor
@@ -222,6 +286,90 @@ template PledgeCloseout
   where
     signatory securedParty
     observer investor, custodian, auditor
+
+    choice RequestEvidence : ContractId AuditEvidence
+      with
+        ttlHours : Int
+      controller auditor
+      do
+        td <- getTime
+        create AuditEvidence with
+          auditor
+          securedParty
+          investor
+          closeoutCid = self
+          finalStatus
+          summary
+          requestedAt = td
+          ttlHours
+
+-- U7: Non-consuming audit evidence disclosure
+template AuditEvidence
+  with
+    auditor : Party
+    securedParty : Party
+    investor : Party
+    closeoutCid : ContractId PledgeCloseout
+    finalStatus : CallStatus
+    summary : Text
+    requestedAt : Time
+    ttlHours : Int
+  where
+    signatory auditor
+    observer securedParty, investor
+    ensure ttlHours > 0
+
+-- U9: Token standard compliance registry
+template TokenComplianceCheck
+  with
+    positionCid : ContractId TreasuryPosition
+    custodian : Party
+    auditor : Party
+    tokenStandard : Text
+    certifiedAt : Time
+  where
+    signatory custodian
+    observer auditor
+
+-- U6: Blind collateral auction — investors create bids directly
+-- Each CollateralBid is signatory=investor, observer=custodian only
+-- Other investors cannot see rival bids — that's the "blind" part
+template CollateralBid
+  with
+    callId : ContractId MarginCall
+    investor : Party
+    custodian : Party
+    positionCid : ContractId TreasuryPosition
+    pledgedValue : Decimal
+    haircutPct : Decimal
+    currency : Text
+    notes : Text
+  where
+    signatory investor
+    observer custodian
+    ensure pledgedValue > 0.0
+
+    choice AcceptAsWinner : ContractId CollateralOffer
+      controller custodian
+      do
+        call <- fetch callId
+        position <- fetch positionCid
+        assertMsg "position belongs to bidder" (position.investor == investor)
+        assertMsg "position is not eligible collateral" position.eligible
+        assertMsg "bid haircut below minimum" (haircutPct >= call.minimumHaircutPct)
+        assertMsg "pledged value too small" (pledgedValue >= call.requiredValue)
+        create CollateralOffer with
+          callId
+          securedParty = call.securedParty
+          investor
+          custodian
+          auditor = call.auditor
+          positionCid
+          pledgedValue
+          haircutPct
+          currency
+          recommendationNote = "Selected from blind multi-investor collateral auction — Canton privacy model."
+
 
 setupParties : Script (Party, Party, Party, Party)
 setupParties = script do
@@ -283,6 +431,67 @@ setupWorkflow = script do
     call
     terms
 
+setupAtomicWorkflow : Script AtomicSetup
+setupAtomicWorkflow = script do
+  (investor, securedParty, custodian, auditor) <- setupParties
+  dueDate <- getTime
+
+  position <- submit (actAs [investor, custodian]) do
+    createCmd TreasuryPosition with
+      investor
+      custodian
+      auditor
+      cusip = "91282CJC6"
+      issuer = "U.S. Treasury"
+      faceValue = 5000000.0
+      marketValue = 4965000.0
+      haircutPct = 2.0
+      maturityDate = "2028-01-31"
+      liquidityTier = "Tier 1"
+      eligible = True
+      riskNotes = "On-the-run Treasury; high liquidity; custodian-verified."
+
+  cash <- submit securedParty do
+    createCmd TokenizedCash with
+      issuer = securedParty
+      holder = securedParty
+      amount = 5000000.0
+      currency = "USD"
+      eligible = True
+
+  call <- submit securedParty do
+    createCmd MarginCall with
+      securedParty
+      investor
+      auditor
+      requiredValue = 4750000.0
+      currency = "USD"
+      reason = "Intraday repo exposure breach"
+      callType = "Repo margin call"
+      counterpartyExposure = 11900000.0
+      minimumHaircutPct = 2.0
+      dueDate
+      status = CallOpen
+
+  terms <- submit securedParty do
+    createCmd ExposureTerms with
+      securedParty
+      investor
+      valuationSource = "NorthBank internal repo book + custodian marks"
+      disputeWindowHours = 4
+      closeoutThresholdPct = 102.0
+      sensitiveNote = "Counterparty watchlist flag remains private to AtlasFund and NorthBank."
+
+  pure AtomicSetup with
+    investor
+    securedParty
+    custodian
+    auditor
+    position
+    call
+    terms
+    cash
+
 workflowHappyPath : Script ()
 workflowHappyPath = script do
   setup <- setupWorkflow
@@ -327,6 +536,156 @@ workflowDefaultPath = script do
 
   pure ()
 
+workflowAtomicSettlement : Script ()
+workflowAtomicSettlement = script do
+  setup <- setupAtomicWorkflow
+
+  offer <- submit setup.investor do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position
+      custodian = setup.custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  locked <- submit setup.custodian do
+    exerciseCmd offer LockByCustodian
+
+  pledge <- submit setup.securedParty do
+    exerciseCmd locked SettleRepo with
+      cashCid = setup.cash
+
+  transfers <- query @CashTransfer setup.investor
+  case transfers of
+    [(_, transfer)] -> do
+      assertMsg "cash transfer amount must match locked value" (transfer.amount == 4865700.0)
+    _ ->
+      assertMsg "investor should see exactly one cash transfer after atomic settlement" False
+
+  pledges <- query @ActivePledge setup.investor
+  case pledges of
+    [(_, pledgeItem)] -> do
+      assertMsg "pledge terminal status must be Settled" (pledgeItem.terminalStatus == Settled)
+    _ ->
+      assertMsg "investor should see exactly one active pledge after atomic settlement" False
+
+  _closeout <- submit setup.securedParty do
+    exerciseCmd pledge ReleaseCollateral
+
+  pure ()
+
+workflowAtomicDvpFailure : Script ()
+workflowAtomicDvpFailure = script do
+  (investor, securedParty, custodian, auditor) <- setupParties
+  dueDate <- getTime
+
+  position <- submit (actAs [investor, custodian]) do
+    createCmd TreasuryPosition with
+      investor
+      custodian
+      auditor
+      cusip = "91282CJC6"
+      issuer = "U.S. Treasury"
+      faceValue = 5000000.0
+      marketValue = 4965000.0
+      haircutPct = 2.0
+      maturityDate = "2028-01-31"
+      liquidityTier = "Tier 1"
+      eligible = True
+      riskNotes = "On-the-run Treasury; high liquidity; custodian-verified."
+
+  cash <- submit securedParty do
+    createCmd TokenizedCash with
+      issuer = securedParty
+      holder = securedParty
+      amount = 4000000.0
+      currency = "USD"
+      eligible = True
+
+  call <- submit securedParty do
+    createCmd MarginCall with
+      securedParty
+      investor
+      auditor
+      requiredValue = 4750000.0
+      currency = "USD"
+      reason = "Intraday repo exposure breach"
+      callType = "Repo margin call"
+      counterpartyExposure = 11900000.0
+      minimumHaircutPct = 2.0
+      dueDate
+      status = CallOpen
+
+  terms <- submit securedParty do
+    createCmd ExposureTerms with
+      securedParty
+      investor
+      valuationSource = "NorthBank internal repo book + custodian marks"
+      disputeWindowHours = 4
+      closeoutThresholdPct = 102.0
+      sensitiveNote = "Counterparty watchlist flag remains private to AtlasFund and NorthBank."
+
+  offer <- submit investor do
+    exerciseCmd call OfferCollateral with
+      positionCid = position
+      custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  locked <- submit custodian do
+    exerciseCmd offer LockByCustodian
+
+  submitMustFail securedParty do
+    exerciseCmd locked SettleRepo with
+      cashCid = cash
+
+  transfers <- query @CashTransfer investor
+  assertMsg "cash transfer must NOT exist when settle fails — proves atomicity" (length transfers == 0)
+
+  pledges <- query @ActivePledge investor
+  assertMsg "active pledge must NOT exist when settle fails — proves atomicity" (length pledges == 0)
+
+  pure ()
+
+workflowPrivacyDvp : Script ()
+workflowPrivacyDvp = script do
+  setup <- setupAtomicWorkflow
+
+  offer <- submit setup.investor do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position
+      custodian = setup.custodian
+      pledgedValue = 4865700.0
+      haircutPct = 2.0
+
+  locked <- submit setup.custodian do
+    exerciseCmd offer LockByCustodian
+
+  _pledge <- submit setup.securedParty do
+    exerciseCmd locked SettleRepo with
+      cashCid = setup.cash
+
+  investorTransfers <- query @CashTransfer setup.investor
+  securedTransfers <- query @CashTransfer setup.securedParty
+  custodianTransfers <- query @CashTransfer setup.custodian
+  auditorTransfers <- query @CashTransfer setup.auditor
+
+  assertMsg "investor should see the atomic cash transfer" (length investorTransfers == 1)
+  assertMsg "secured party should see the atomic cash transfer" (length securedTransfers == 1)
+  assertMsg "custodian should NOT see the cash transfer — private to cash parties" (length custodianTransfers == 0)
+  assertMsg "auditor should NOT see the cash transfer — private to cash parties" (length auditorTransfers == 0)
+
+  investorCash <- query @TokenizedCash setup.investor
+  securedCash <- query @TokenizedCash setup.securedParty
+  custodianCash <- query @TokenizedCash setup.custodian
+  auditorCash <- query @TokenizedCash setup.auditor
+
+  assertMsg "investor should NOT see TokenizedCash — not the holder" (length investorCash == 0)
+  assertMsg "secured party (issuer+holder) should see TokenizedCash" (length securedCash >= 1)
+  assertMsg "custodian should NOT see TokenizedCash" (length custodianCash == 0)
+  assertMsg "auditor should NOT see TokenizedCash" (length auditorCash == 0)
+
+  pure ()
+
 workflowPrivacyVisibility : Script ()
 workflowPrivacyVisibility = script do
   setup <- setupWorkflow
@@ -354,5 +713,158 @@ workflowWrongPartyRejected = script do
 
   submitMustFail setup.investor do
     exerciseCmd setup.terms Archive
+
+  pure ()
+
+workflowBlindAuction : Script ()
+workflowBlindAuction = script do
+  (investor1, securedParty, custodian, auditor) <- setupParties
+  investor2 <- allocatePartyByHint (PartyIdHint "MeridianCap")
+  investor3 <- allocatePartyByHint (PartyIdHint "ApexTreasury")
+  dueDate <- getTime
+
+  position1 <- submit (actAs [investor1, custodian]) do
+    createCmd TreasuryPosition with
+      investor = investor1; custodian; auditor
+      cusip = "91282CJC6"; issuer = "U.S. Treasury"
+      faceValue = 5000000.0; marketValue = 4965000.0; haircutPct = 2.0
+      maturityDate = "2028-01-31"; liquidityTier = "Tier 1"
+      eligible = True; riskNotes = "AtlasFund Tier-1 UST."
+
+  position2 <- submit (actAs [investor2, custodian]) do
+    createCmd TreasuryPosition with
+      investor = investor2; custodian; auditor
+      cusip = "91282CKQ3"; issuer = "U.S. Treasury"
+      faceValue = 6000000.0; marketValue = 5945000.0; haircutPct = 2.5
+      maturityDate = "2029-05-15"; liquidityTier = "Tier 1"
+      eligible = True; riskNotes = "MeridianCap Tier-1 UST."
+
+  position3 <- submit (actAs [investor3, custodian]) do
+    createCmd TreasuryPosition with
+      investor = investor3; custodian; auditor
+      cusip = "91282CJA0"; issuer = "U.S. Treasury"
+      faceValue = 4300000.0; marketValue = 4200000.0; haircutPct = 2.0
+      maturityDate = "2027-12-31"; liquidityTier = "Tier 1"
+      eligible = True; riskNotes = "ApexTreasury Tier-1 UST."
+
+  call <- submit securedParty do
+    createCmd MarginCall with
+      securedParty; investor = investor1; auditor
+      requiredValue = 4750000.0; currency = "USD"
+      reason = "Multi-party repo exposure — blind auction required"
+      callType = "Repo margin call - auction"
+      counterpartyExposure = 11900000.0
+      minimumHaircutPct = 2.0; dueDate; status = CallOpen
+
+  bid1 <- submit investor1 do
+    createCmd CollateralBid with
+      callId = call; investor = investor1; custodian
+      positionCid = position1
+      pledgedValue = 4865700.0; haircutPct = 2.0; currency = "USD"
+      notes = "AtlasFund — lowest-surplus eligible bid"
+
+  bid2 <- submit investor2 do
+    createCmd CollateralBid with
+      callId = call; investor = investor2; custodian
+      positionCid = position2
+      pledgedValue = 5800000.0; haircutPct = 2.5; currency = "USD"
+      notes = "MeridianCap — buffer bid"
+
+  bid3 <- submit investor3 do
+    createCmd CollateralBid with
+      callId = call; investor = investor3; custodian
+      positionCid = position3
+      pledgedValue = 3998400.0; haircutPct = 2.0; currency = "USD"
+      notes = "ApexTreasury — below-requirement bid"
+
+  investor1Sees <- query @CollateralBid investor1
+  investor2Sees <- query @CollateralBid investor2
+  investor3Sees <- query @CollateralBid investor3
+  custodianSees <- query @CollateralBid custodian
+  auditorSees <- query @CollateralBid auditor
+
+  assertMsg "investor1 sees only its own bid (blind)" (length investor1Sees == 1)
+  assertMsg "investor2 sees only its own bid (blind)" (length investor2Sees == 1)
+  assertMsg "investor3 sees only its own bid — blind to others" (length investor3Sees == 1)
+  assertMsg "custodian sees all 3 bids" (length custodianSees == 3)
+  assertMsg "auditor sees zero bids (not an observer)" (length auditorSees == 0)
+
+  submitMustFail (actAs [custodian, investor3]) do
+    exerciseCmd bid3 AcceptAsWinner
+
+  offer <- submit (actAs [custodian, investor1]) do
+    exerciseCmd bid1 AcceptAsWinner
+
+  pure ()
+
+workflowAuditEvidence : Script ()
+workflowAuditEvidence = script do
+  setup <- setupWorkflow
+
+  offer <- submit setup.investor do
+    exerciseCmd setup.call OfferCollateral with
+      positionCid = setup.position; custodian = setup.custodian
+      pledgedValue = 4865700.0; haircutPct = 2.0
+
+  locked <- submit setup.custodian do
+    exerciseCmd offer LockByCustodian
+
+  pledge <- submit setup.securedParty do
+    exerciseCmd locked AcceptPledge
+
+  closeout <- submit setup.securedParty do
+    exerciseCmd pledge ReleaseCollateral
+
+  evidence <- submit setup.auditor do
+    exerciseCmd closeout RequestEvidence with
+      ttlHours = 24
+
+  auditorEvidence <- query @AuditEvidence setup.auditor
+  case auditorEvidence of
+    [(_, ev)] -> do
+      assertMsg "audit evidence final status must match closeout" (ev.finalStatus == Released)
+    _ ->
+      assertMsg "auditor should see exactly one audit evidence record" False
+
+  custodianEvidence <- query @AuditEvidence setup.custodian
+  assertMsg "custodian should NOT see audit evidence" (length custodianEvidence == 0)
+
+  pure ()
+
+workflowTokenCompliance : Script ()
+workflowTokenCompliance = script do
+  (investor, securedParty, custodian, auditor) <- setupParties
+  dueDate <- getTime
+
+  position <- submit (actAs [investor, custodian]) do
+    createCmd TreasuryPosition with
+      investor; custodian; auditor
+      cusip = "91282CJC6"; issuer = "U.S. Treasury"
+      faceValue = 5000000.0; marketValue = 4965000.0; haircutPct = 2.0
+      maturityDate = "2028-01-31"; liquidityTier = "Tier 1"
+      eligible = True; riskNotes = "On-the-run Treasury; custodian-verified."
+
+  compliance <- submit custodian do
+    createCmd TokenComplianceCheck with
+      positionCid = position; custodian; auditor
+      tokenStandard = "CIP-0056"
+      certifiedAt = dueDate
+
+  investorCompliance <- query @TokenComplianceCheck investor
+  custodianCompliance <- query @TokenComplianceCheck custodian
+  auditorCompliance <- query @TokenComplianceCheck auditor
+
+  assertMsg "investor should NOT see compliance check (not observer)" (length investorCompliance == 0)
+  assertMsg "custodian should see compliance check" (length custodianCompliance == 1)
+  assertMsg "auditor should see compliance check" (length auditorCompliance == 1)
+
+  call <- submit securedParty do
+    createCmd MarginCall with
+      securedParty; investor; auditor
+      requiredValue = 4750000.0; currency = "USD"
+      reason = "Compliant tokenized repo margin call"
+      callType = "Repo margin call"
+      counterpartyExposure = 11900000.0
+      minimumHaircutPct = 2.0; dueDate; status = CallOpen
 
   pure ()

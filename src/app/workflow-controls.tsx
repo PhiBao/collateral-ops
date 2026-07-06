@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, RotateCcw } from "lucide-react";
+import { ArrowRight, Brain, RotateCcw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState, useTransition } from "react";
 import type { PartyRole, WorkflowAction, WorkflowScenario } from "@/lib/types";
@@ -21,6 +21,10 @@ const actionCopy: Record<WorkflowAction, { label: string; helper: string }> = {
   accept: {
     label: "Accept pledge",
     helper: "Turn the locked collateral into the active secured pledge.",
+  },
+  settle: {
+    label: "Settle repo atomically",
+    helper: "Cash leg + collateral leg in ONE Canton transaction — impossible on EVM.",
   },
   release: {
     label: "Release collateral",
@@ -52,24 +56,32 @@ const scenarioCopy: Array<{ value: WorkflowScenario; label: string; helper: stri
     label: "Fallback",
     helper: "Shows rejected collateral before selecting the fallback asset.",
   },
+  {
+    value: "weekend-stress",
+    label: "Weekend Stress",
+    helper: "Sat 02:30 UTC call — atomic DvP repo settlement with cash leg.",
+  },
 ];
 
 export function WorkflowControls({
   actions,
   activeParty,
   stage,
+  onAgentResult,
 }: {
   actions: WorkflowAction[];
   activeParty: PartyRole;
   stage: string;
+  onAgentResult?: (result: string) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [submittingAction, setSubmittingAction] = useState<WorkflowAction | "reset" | null>(null);
+  const [submittingAction, setSubmittingAction] = useState<WorkflowAction | "reset" | "agent" | null>(null);
   const [scenario, setScenario] = useState<WorkflowScenario>("standard");
   const [accessKey, setAccessKey] = useState("");
   const [needsAccessKey, setNeedsAccessKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentResponse, setAgentResponse] = useState<string | null>(null);
   const canChooseScenario = actions.includes("bootstrap");
   const hasStarted = stage !== "call-open" || !canChooseScenario;
 
@@ -144,6 +156,42 @@ export function WorkflowControls({
     }
   }
 
+  async function askAgent() {
+    setSubmittingAction("agent");
+    setError(null);
+    setAgentResponse(null);
+
+    try {
+      const response = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activeParty, observationOnly: false }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        if (payload?.requiresSession) setNeedsAccessKey(true);
+        setError(payload?.message ?? "Agent failed.");
+        setSubmittingAction(null);
+        return;
+      }
+
+      const payload = await response.json();
+      setAgentResponse(payload.reasoning ?? "Agent suggested the next step.");
+
+      if (payload.action) {
+        startTransition(() => {
+          router.replace(`/?party=${activeParty}`);
+          router.refresh();
+        });
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Agent failed.");
+    } finally {
+      setSubmittingAction(null);
+    }
+  }
+
   return (
     <div className="actions">
       {needsAccessKey ? (
@@ -191,6 +239,25 @@ export function WorkflowControls({
           </button>
         ))
       )}
+
+      {hasStarted ? (
+        <button
+          className="agent-button"
+          disabled={pending || submittingAction !== null}
+          onClick={askAgent}
+          type="button"
+        >
+          <Brain size={16} aria-hidden="true" />
+          <span>{submittingAction === "agent" ? "Agent thinking..." : "Ask agent to decide next step"}</span>
+        </button>
+      ) : null}
+
+      {agentResponse ? (
+        <div className="agent-response">
+          <span>Agent</span>
+          <p>{agentResponse}</p>
+        </div>
+      ) : null}
 
       {hasStarted ? (
         <button className="reset-button" disabled={pending || submittingAction !== null} onClick={resetDemo} type="button">

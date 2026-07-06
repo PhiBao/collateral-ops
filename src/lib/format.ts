@@ -16,3 +16,7 @@ export function shortTime(value: string) {
     timeZoneName: "short",
   }).format(new Date(value));
 }
+
+export function settlementTime(seconds: number) {
+  return `${seconds}s vs T+1 (manual)`;
+}

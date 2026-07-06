@@ -2,18 +2,21 @@ export type PartyRole = "investor" | "securedParty" | "custodian" | "auditor";
 
 export type LedgerMode = "canton-json-api";
 
-export type WorkflowScenario = "standard" | "default-risk" | "undercovered";
+export type WorkflowScenario = "standard" | "default-risk" | "undercovered" | "weekend-stress";
 
 export type WorkflowStage =
   | "call-open"
   | "offer-posted"
   | "collateral-locked"
   | "pledge-active"
+  | "settled"
   | "released"
   | "seized";
 
 export type ContractKind =
   | "TreasuryPosition"
+  | "TokenizedCash"
+  | "CashTransfer"
   | "MarginCall"
   | "ExposureTerms"
   | "CollateralOffer"
@@ -34,6 +37,7 @@ export interface WorkflowSessionState {
   activeAtOffset?: number;
   scenario?: WorkflowScenario;
   lastAction?: WorkflowAction;
+  bootstrapTimestamp?: number;
 }
 
 export interface TreasuryPosition {
@@ -52,7 +56,26 @@ export interface TreasuryPosition {
   eligible: boolean;
   riskNotes: string;
   postHaircutValue: number;
-  encumbrance: "free" | "offered" | "locked" | "pledged" | "released" | "seized";
+  encumbrance: "free" | "offered" | "locked" | "pledged" | "settled" | "released" | "seized";
+}
+
+export interface TokenizedCash {
+  id: string;
+  kind: "TokenizedCash";
+  issuer: string;
+  holder: string;
+  amount: number;
+  currency: string;
+  eligible: boolean;
+}
+
+export interface CashTransfer {
+  id: string;
+  kind: "CashTransfer";
+  from: string;
+  to: string;
+  amount: number;
+  currency: string;
 }
 
 export interface MarginCall {
@@ -124,7 +147,7 @@ export interface ActivePledge {
   haircutPct: number;
   recommendationNote: string;
   acceptedAt: string;
-  terminalState?: "released" | "seized";
+  terminalStatus?: "active" | "settled" | "released" | "seized";
 }
 
 export interface AuditReceipt {
@@ -154,6 +177,8 @@ export interface PledgeCloseout {
 
 export type WorkflowContract =
   | TreasuryPosition
+  | TokenizedCash
+  | CashTransfer
   | MarginCall
   | ExposureTerms
   | CollateralOffer
@@ -177,6 +202,7 @@ export interface WorkflowSnapshot {
   nextActions: WorkflowAction[];
   updatedAt: string;
   updateId?: string;
+  settlementSeconds?: number;
 }
 
 export interface CollateralRecommendation {
@@ -200,6 +226,7 @@ export interface PartyVisibilityProof {
   visibleContractCount: number;
   visibleTemplateIds: string[];
   seesPrivateTerms: boolean;
+  seesCashLeg: boolean;
   hiddenSensitiveTemplates: string[];
 }
 
@@ -213,7 +240,7 @@ export interface CantonProof {
   scenario: WorkflowScenario;
 }
 
-export type WorkflowAction = "bootstrap" | "offer" | "lock" | "accept" | "release" | "seize" | "default";
+export type WorkflowAction = "bootstrap" | "offer" | "lock" | "accept" | "settle" | "release" | "seize" | "default";
 
 export interface WorkflowResult {
   ok: true;

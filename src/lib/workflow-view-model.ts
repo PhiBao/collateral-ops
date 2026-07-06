@@ -1,4 +1,4 @@
-import { shortTime, usd } from "./format";
+import { shortTime, settlementTime, usd } from "./format";
 import type {
   ContractKind,
   MarginCall,
@@ -36,6 +36,8 @@ export const roleCopy: Record<PartyRole, { name: string; shortName: string; desc
 
 export const visibilityLabels: Record<ContractKind, string> = {
   TreasuryPosition: "Treasury position",
+  TokenizedCash: "Tokenized cash reserve",
+  CashTransfer: "Atomic cash transfer",
   MarginCall: "Margin call",
   ExposureTerms: "Private exposure terms",
   CollateralOffer: "Collateral offer",
@@ -74,11 +76,19 @@ const stageCopy: Record<
   },
   "collateral-locked": {
     label: "Custody lock active",
-    headline: "The Treasury position is locked and ready for acceptance.",
+    headline: "The Treasury position is locked and ready for settlement.",
     summary: "ClearVault marked the Treasury position as encumbered on Canton.",
-    next: "NorthBank should accept the locked collateral as an active pledge.",
+    next: "NorthBank should settle the repo atomically: cash leg + collateral leg in one Canton transaction.",
     nextActor: "securedParty",
-    outcome: "Accept pledge",
+    outcome: "Settle repo",
+  },
+  "settled": {
+    label: "Repo settled",
+    headline: "Cash and collateral settled atomically on Canton.",
+    summary: "The cash transfer and pledge were confirmed in a single Canton transaction — all-or-nothing atomicity.",
+    next: "Resolve the exposure by release, or prove the default closeout path.",
+    nextActor: "securedParty",
+    outcome: "Resolve pledge",
   },
   "pledge-active": {
     label: "Pledge active",
@@ -111,6 +121,7 @@ const actionIntent: Record<WorkflowAction, string> = {
   offer: "Offer collateral",
   lock: "Lock asset",
   accept: "Accept pledge",
+  settle: "Settle repo atomically",
   release: "Release collateral",
   seize: "Seize collateral",
   default: "Run default closeout",
@@ -138,6 +149,7 @@ export interface WorkflowViewModel {
   collateralState: string;
   proofStatus: string;
   scenarioLabel: string;
+  settlementClock: string;
 }
 
 export function buildWorkflowViewModel(snapshot: WorkflowSnapshot): WorkflowViewModel {
@@ -180,12 +192,14 @@ export function buildWorkflowViewModel(snapshot: WorkflowSnapshot): WorkflowView
     collateralState: position?.encumbrance ?? "not visible",
     proofStatus: snapshot.proof.activeAtOffset ? `Offset ${snapshot.proof.activeAtOffset}` : "Not bootstrapped",
     scenarioLabel: scenarioLabel(snapshot.scenario),
+    settlementClock: snapshot.settlementSeconds ? settlementTime(snapshot.settlementSeconds) : "",
   };
 }
 
 function scenarioLabel(scenario: WorkflowSnapshot["scenario"]) {
   if (scenario === "default-risk") return "Default-risk path";
   if (scenario === "undercovered") return "Fallback collateral path";
+  if (scenario === "weekend-stress") return "Weekend stress — atomic repo";
   return "Standard margin call";
 }
 
@@ -194,11 +208,11 @@ export function workflowSteps(stage: WorkflowStage, started: boolean) {
     { key: "call-open", label: "Call opened", actor: "Secured Party" },
     { key: "offer-posted", label: "Collateral offered", actor: "Investor" },
     { key: "collateral-locked", label: "Asset locked", actor: "Custodian" },
-    { key: "pledge-active", label: "Pledge accepted", actor: "Secured Party" },
+    { key: "settled", label: "Repo settled (atomic)", actor: "Secured Party" },
     { key: "released", label: "Released", actor: "Secured Party" },
     { key: "seized", label: "Default closeout", actor: "Secured Party" },
   ] as const;
-  const index = steps.findIndex((step) => step.key === stage);
+  const index = steps.findIndex((step) => step.key === stage || (stage === "pledge-active" && step.key === "settled"));
   const activeIndex = started ? Math.max(0, index === -1 ? 0 : index) : -1;
 
   return steps.map((step, stepIndex) => ({

@@ -2,7 +2,9 @@ import {
   AlertCircle,
   CheckCircle2,
   ClipboardCheck,
+  Clock,
   Eye,
+  EyeOff,
   FileText,
   Landmark,
   LockKeyhole,
@@ -20,7 +22,7 @@ import {
   readWorkflowSessionStateFromCookieValue,
   workflowContextCookieName,
 } from "@/lib/demo-session";
-import { shortTime, usd } from "@/lib/format";
+import { shortTime, settlementTime, usd } from "@/lib/format";
 import {
   buildWorkflowViewModel,
   roleCopy,
@@ -90,6 +92,12 @@ export default async function Home({
       </section>
 
       {!healthValue.healthy ? <BackendWakeNotice message={healthValue.message} /> : null}
+      {snapshot.settlementSeconds ? (
+        <section className="container settlement-strip" aria-label="Settlement speed">
+          <Clock size={18} aria-hidden="true" />
+          <span>Settled in <strong>{settlementTime(snapshot.settlementSeconds)}</strong></span>
+        </section>
+      ) : null}
 
       <section className="role-band">
         <div className="container role-layout">
@@ -108,6 +116,8 @@ export default async function Home({
           </nav>
         </div>
       </section>
+
+      <CantSeePanel snapshot={snapshot} activeParty={activeParty} />
 
       <section className="container metric-strip" aria-label="Workflow metrics">
         <MetricCard label="Required collateral" value={model.requiredValue} helper="Minimum post-haircut value" />
@@ -166,7 +176,7 @@ export default async function Home({
           <SectionHeading
             icon={<LockKeyhole size={18} />}
             title="Tokenized Treasury Inventory"
-            text="The asset state shows whether collateral is free, offered, locked, pledged, released, or seized."
+            text="The asset state shows whether collateral is free, offered, locked, pledged, settled, released, or seized."
           />
           <Inventory snapshot={snapshot} activeParty={activeParty} />
         </section>
@@ -190,6 +200,31 @@ export default async function Home({
         </section>
       </section>
     </main>
+  );
+}
+
+function CantSeePanel({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
+  const proof = snapshot.proof.partyVisibility.find((p) => p.role === activeParty);
+  if (!proof || proof.hiddenSensitiveTemplates.length === 0) return null;
+
+  return (
+    <section className="container cant-see-panel" aria-label="Privacy restrictions for this role">
+      <div>
+        <EyeOff size={16} aria-hidden="true" />
+        <div>
+          <strong>{roleCopy[activeParty].name} cannot see:</strong>
+          <ul>
+            {proof.hiddenSensitiveTemplates.map((t) => (
+              <li key={t}>
+                {t === "ExposureTerms" ? "Bilateral exposure terms (Canton: observer=investor only)" : ""}
+                {t === "CashTransfer" ? "Atomic cash transfer (Canton: signatory=from, observer=to)" : ""}
+                {t === "TokenizedCash" ? "Cash reserve (Canton: signatory=issuer, observer=holder)" : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -227,7 +262,7 @@ function AppHeader({
         </span>
         <div>
           <strong>CollateralOps</strong>
-          <small>Private collateral resolution</small>
+          <small>Private atomic repo</small>
         </div>
       </a>
       <div className="header-status">
@@ -360,7 +395,7 @@ function PrivacyMatrix({ visibility }: { visibility: Record<ContractKind, boolea
     <div className="privacy-list">
       {Object.entries(visibility).map(([kind, visible]) => (
         <div className="privacy-row" key={kind}>
-          <span>{visibilityLabels[kind as ContractKind]}</span>
+          <span>{visibilityLabels[kind as ContractKind] ?? kind}</span>
           <strong className={visible ? "visible" : "hidden"}>{visible ? "Visible" : "Hidden"}</strong>
         </div>
       ))}
@@ -368,9 +403,22 @@ function PrivacyMatrix({ visibility }: { visibility: Record<ContractKind, boolea
   );
 }
 
+function RedactedPlaceholder({ reason }: { reason: string }) {
+  return (
+    <div className="redacted-overlay">
+      <div>
+        <EyeOff size={16} aria-hidden="true" />
+        <strong>REDACTED — Private to bilateral parties only</strong>
+      </div>
+      <p>{reason}</p>
+    </div>
+  );
+}
+
 function MarginCallBrief({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; activeParty: PartyRole }) {
   const calls = contractsOf(snapshot.contracts, "MarginCall");
   const terms = contractsOf(snapshot.contracts, "ExposureTerms");
+  const termsHidden = activeParty === "custodian" || activeParty === "auditor";
 
   if (calls.length === 0) {
     return (
@@ -398,17 +446,21 @@ function MarginCallBrief({ snapshot, activeParty }: { snapshot: WorkflowSnapshot
       </div>
       <div className="brief-list terms-list">
         {terms.length > 0 ? (
-          terms.map((contract) => (
-            <article className="brief-item private-terms" key={contract.id}>
-              <strong>Private exposure terms</strong>
-              <div className="mini-metrics">
-                <MetricInline label="Valuation source" value={contract.valuationSource} />
-                <MetricInline label="Dispute window" value={`${contract.disputeWindowHours}h`} />
-                <MetricInline label="Closeout threshold" value={`${contract.closeoutThresholdPct}%`} />
-              </div>
-              <p>{contract.sensitiveNote}</p>
-            </article>
-          ))
+          termsHidden ? (
+            <RedactedPlaceholder reason="ExposureTerms: signatory=NorthBank, observer=AtlasFund only — Canton privacy model hides these from custodians and auditors." />
+          ) : (
+            terms.map((contract) => (
+              <article className="brief-item private-terms" key={contract.id}>
+                <strong>Private exposure terms</strong>
+                <div className="mini-metrics">
+                  <MetricInline label="Valuation source" value={contract.valuationSource} />
+                  <MetricInline label="Dispute window" value={`${contract.disputeWindowHours}h`} />
+                  <MetricInline label="Closeout threshold" value={`${contract.closeoutThresholdPct}%`} />
+                </div>
+                <p>{contract.sensitiveNote}</p>
+              </article>
+            ))
+          )
         ) : (
           <EmptyState
             title="Private terms hidden"
@@ -444,7 +496,7 @@ function Inventory({ snapshot, activeParty }: { snapshot: WorkflowSnapshot; acti
             <MetricInline label="Market value" value={usd(contract.marketValue)} />
             <MetricInline label="Post-haircut" value={usd(contract.postHaircutValue)} />
             <MetricInline label="Haircut" value={`${contract.haircutPct}%`} />
-            <MetricInline label="State" value={contract.encumbrance} />
+            <MetricInline label="State" value={contract.encumbrance ?? "not visible"} />
           </div>
           <p className="risk-note">
             <TriangleAlert size={15} />
@@ -528,6 +580,7 @@ function PartyProofMatrix({ snapshot }: { snapshot: WorkflowSnapshot }) {
           </div>
           <MetricInline label="Visible contracts" value={String(proof.visibleContractCount)} />
           <MetricInline label="Private terms" value={proof.seesPrivateTerms ? "Visible" : "Hidden"} />
+          <MetricInline label="Cash leg" value={proof.seesCashLeg ? "Visible" : "Hidden"} />
         </div>
       ))}
     </div>

@@ -1,90 +1,92 @@
-# CollateralOps Command Center
+# CollateralOps — Private Atomic Repo on Canton
 
-CollateralOps Command Center is a private collateral mobility terminal for tokenized Treasury workflows on Canton.
+CollateralOps is a private, atomic repo settlement terminal backed by Canton Network. It turns a multi-party margin call into an atomic DvP (Delivery-vs-Payment) workflow: tokenized Treasury collateral AND tokenized cash settle in one Canton transaction — all-or-nothing, with sub-transaction privacy by default.
 
-It helps an institutional collateral team respond to a margin call without turning a sensitive multi-party workflow into a public shared dashboard. An investor receives a repo margin call, the app recommends eligible tokenized UST collateral, a custodian locks the position, a secured party accepts the pledge, and an auditor receives the evidence it is allowed to see.
+Built for the **Build on Canton Hackathon** (Encode Club × Canton Foundation, July 2026). Primary entry: **Track 2 (TradeFi, RWA & Tokenized Assets)**, with cross-cutting claims on **Track 1 (Private DeFi & Capital Markets)** and **Track 3 (Agentic Commerce)**.
 
-The product thesis is simple: tokenized real-world assets become more useful when collateral movement is fast, private, auditable, and operationally understandable.
+## Why This Needs Canton (Impossible on EVM)
+
+| Capability | Canton | EVM / Solana |
+|---|---|---|
+| **Atomic cross-leg DvP** | Cash + collateral settle in one Daml transaction — both legs succeed or both revert | Requires sequential execution or lock/unlock patterns with race conditions |
+| **Party-scoped privacy** | Custodian and auditor CANNOT see bilateral ExposureTerms or CashTransfer — enforced by Daml signatory/observer rules | All state is globally visible; privacy requires ZK (complex, breaks composability) or sidechains (breaks atomicity) |
+| **Multi-party authorization** | `SettleRepo` fetches TokenizedCash, asserts eligibility, creates CashTransfer AND ActivePledge — all with in-type `controller`/`signatory` restrictions | Authorization requires manual `require(msg.sender)` checks scattered across functions |
+| **No global state leakage** | Each party queries only their own view; the Synchronizer never sees contract data | Every node replicates every contract; privacy is an application-layer afterthought |
+
+**The repo demo proves it:** `workflowAtomicDvpFailure` Daml Script test asserts that when cash is insufficient, NO CashTransfer is visible to the investor, and NO ActivePledge is visible to the secured party. The entire multi-leg transaction rolls back. This is structurally impossible on EVM.
+
+## Tracks
+
+- **Primary: Track 2 — TradeFi, RWA & Tokenized Assets** — tokenized Treasury collateral mobility with atomic repo settlement, blind multi-investor collateral auction
+- **Cross-claim: Track 1 — Private DeFi & Capital Markets** — bilateral repo with party-scoped privacy, no public order book leakage
+- **Cross-claim: Track 3 — Agentic Commerce** — AI agent exercises Daml choices autonomously via `/api/agent`
 
 ## The Problem
 
-Collateral operations are still too manual for markets that increasingly expect real-time settlement.
+Collateral operations are too manual, too slow, and too transparent for institutional repo workflows.
 
 In a typical margin-call workflow:
 
-- The secured party needs collateral quickly.
+- The secured party needs collateral quickly — often intraday or over the weekend.
 - The investor needs to choose eligible collateral without over-pledging.
 - The custodian must prove the asset is locked and cannot be reused.
 - The auditor needs evidence without unrestricted ledger visibility.
-- Every party needs the same workflow state, but not the same private data.
+- **The cash leg and collateral leg must settle atomically** — no one should be exposed to "half-settlement" risk.
+- **Every party needs the same workflow state, but not the same private data.**
 
-Traditional tools solve this with emails, PDFs, reconciliation queues, and broad internal dashboards. Public-chain style applications solve it poorly because the workflow is naturally private and role-specific.
-
-CollateralOps compresses that workflow into a single operator terminal backed by Canton contracts.
+Traditional tools solve this with emails, PDFs, and T+1 reconciliation. Public-blockchain apps expose sensitive bilateral terms to the entire network. CollateralOps compresses this into a private, atomic Canton terminal.
 
 ## Who It Is For
 
-Initial users:
-
 - Treasury operations teams managing tokenized collateral.
 - Buy-side or fund operators responding to margin calls.
-- Secured lenders and repo desks accepting collateral pledges.
+- Secured lenders and repo desks settling with atomic DvP.
 - Custodians responsible for asset lock and encumbrance proof.
-- Audit or risk teams that need restricted evidence trails.
-
-The interface is intentionally built like an operations terminal, not a consumer wallet or generic analytics page.
+- Audit or risk teams that need restricted evidence — without seeing cash legs or bilateral terms.
 
 ## What The Product Does
 
-CollateralOps currently supports one complete collateral pledge lifecycle across three demo scenarios:
+CollateralOps supports a complete atomic repo lifecycle across four demo scenarios:
 
 1. **Margin call intake**: NorthBank opens a private repo margin call against AtlasFund.
 2. **Collateral recommendation**: the app selects eligible UST collateral with the smallest sufficient post-haircut surplus.
 3. **Investor offer**: AtlasFund offers the recommended tokenized Treasury position.
 4. **Custody lock**: ClearVault locks the asset and proves it is encumbered.
-5. **Secured-party acceptance**: NorthBank accepts the locked collateral as an active pledge.
-6. **Closeout**: NorthBank either releases collateral after exposure normalizes or seizes it after default.
-7. **Restricted audit evidence**: RegSight sees the allowed proof trail without seeing every private contract.
+5. **Atomic DvP settlement**: NorthBank exercises `SettleRepo` — cash leg (TokenizedCash → CashTransfer) AND collateral leg (LockedCollateral → ActivePledge) are created in ONE Canton transaction. If either leg fails, neither succeeds.
+6. **Blind multi-investor collateral auction** (NEW): three investors submit private `CollateralBid` contracts visible only to themselves and the custodian. The custodian selects the winning bid, proving Canton's sub-transaction privacy enables blind-auction B2B marketplaces impossible on transparent chains.
+7. **Closeout**: NorthBank either releases collateral after exposure normalizes or seizes it after default.
+8. **Restricted audit evidence**: RegSight sees the allowed proof trail without seeing the cash transfer, bilateral terms, or cash reserve. Auditors can request time-bounded `AuditEvidence` via a non-consuming choice on `PledgeCloseout` — regulatory disclosure without global visibility.
+9. **Token standard compliance** (NEW): `TokenComplianceCheck` marks Treasury positions against the CIP-0056 token standard, custodian-certified, auditor-visible — demonstrates composable compliance primitives.
+10. **Agentic co-pilot**: an AI agent observes the workflow state and can autonomously exercise the next Canton action via `/api/agent`.
 
 Demo scenarios:
 
 - `standard`: clean margin call with multiple visible collateral candidates.
 - `default-risk`: same workflow staged to show the seizure/default branch.
 - `undercovered`: rejected collateral remains visible with policy reasons before the app selects a fallback asset.
+- `weekend-stress` (NEW): Saturday 02:30 UTC margin call with atomic DvP repo settlement — demonstrates 24/7 intraday capability.
 
 ## Why Canton
 
-This product needs Canton because the workflow is multi-party, private, and stateful.
+This product needs Canton because the workflow is **multi-party, private, stateful, and requires atomic cross-leg settlement**.
 
-The important Canton fit:
+Canton primitives exploited:
 
-- **Party-scoped visibility**: each role queries the same workflow from its own view.
+- **Atomic DvP**: `LockedCollateral.SettleRepo` creates `CashTransfer` AND `ActivePledge` in one choice — Daml transactional all-or-nothing.
+- **Party-scoped visibility**: `CashTransfer` has `signatory from, observer to` — custodian and auditor cannot query it. `ExposureTerms` has `signatory securedParty, observer investor` — hidden from custodian and auditor.
 - **Daml authorization**: signatories, observers, and controllers define who can create, see, and exercise each contract.
-- **Atomic state transitions**: offer, lock, accept, release, and default closeout are explicit ledger transitions.
+- **Daml Script tests verify atomicity**: `workflowAtomicDvpFailure` proves the failure branch leaves zero cash transfer and zero pledge — the impossible-on-EVM proof.
 - **Private bilateral terms**: sensitive exposure terms are visible to the investor and secured party, but hidden from the custodian and auditor.
-- **Institutional asset logic**: tokenized Treasuries, custody locks, margin calls, and audit evidence are natural regulated-finance workflows.
 - **No global public state leakage**: the product can prove workflow progress without exposing a global order book.
-
-## Product Surface
-
-The command center has four operating zones:
-
-- **Party View**: switch between investor, secured party, custodian, and auditor.
-- **Scenario Runner**: start a standard, default-risk, or fallback-collateral workflow.
-- **Workflow Command Stack**: submit the next valid Canton command for the current state.
-- **Collateral Operations Panels**: margin call, private terms, recommendation, inventory, audit evidence, and proof.
-- **Party Visibility Proof**: inspect which templates each party can see at the current offset.
-
-The UI is cyberpunk-terminal styled, but the information architecture is practical: current state first, command next, evidence underneath.
 
 ## Architecture
 
 ```text
 Browser
   |
-  | Next.js UI
+  | Next.js UI (+ agent copilot, privacy redaction, settlement clock)
   v
-Next.js API routes
+Next.js API routes (+ /api/agent)
   |
   | signed demo session + role-scoped command routing
   v
@@ -96,38 +98,58 @@ Canton JSON Ledger API
   |
   v
 Daml contracts in contracts/daml/CollateralOps.daml
+  (+ TokenizedCash, CashTransfer, SettleRepo, 3 new Daml Script tests)
 ```
 
 Main parts:
 
-- `src/app/page.tsx`: command-center UI.
-- `src/lib/canton-client.ts`: Canton JSON API client, workflow actions, party-scoped mapping, and collateral recommendation logic.
-- `src/lib/demo-session.ts`: signed demo session and workflow-context cookies for Vercel-safe previews.
-- `src/app/api/workflow/*`: server routes for snapshots, actions, bootstrap, and recommendations.
+- `src/app/page.tsx`: command-center UI with party-scoped redaction.
+- `src/lib/canton-client.ts`: Canton JSON API client, atomic settle action, party-scoped mapping, collateral recommendation, settlement clock.
+- `src/lib/demo-session.ts`: signed demo session and workflow-context cookies.
+- `src/app/api/agent/*`: AI agent route (Dgrid AI — OpenAI-compatible).
+- `src/app/api/workflow/*`: server routes for snapshots, actions, bootstrap, recommendations.
 - `src/app/api/demo/*`: access-key session and reset routes.
-- `contracts/daml/CollateralOps.daml`: Daml templates and workflow scripts.
-- `scripts/canton-json-proof.sh`: end-to-end HTTP proof through the app API.
-- `Dockerfile.canton` and `render/*`: Render preview backend for the Canton sandbox JSON API.
+- `contracts/daml/CollateralOps.daml`: Daml templates — 9 templates, 10 script tests (3 new atomic/DvP/privacy).
+- `scripts/canton-json-proof.sh`: end-to-end HTTP proof.
 
 ## Daml Model
 
-Core templates:
+Core templates (12 total):
 
-- `TreasuryPosition`: tokenized UST position, investor, custodian, auditor, market value, haircut, eligibility, maturity, liquidity tier, and risk notes.
-- `MarginCall`: secured-party call against an investor, required value, exposure, minimum haircut, due date, and reason.
-- `ExposureTerms`: bilateral private terms visible only to the secured party and investor.
+- `TreasuryPosition`: tokenized UST position.
+- `TokenizedCash`: cash reserve held by the secured party.
+- `CashTransfer`: atomic transfer record created during settlement. signatory: from, observer: to — custodian and auditor never see it.
+- `MarginCall`: secured-party call against an investor.
+- `ExposureTerms`: bilateral private terms (signatory: securedParty, observer: investor).
 - `CollateralOffer`: investor offer of a specific Treasury position.
 - `LockedCollateral`: custodian proof that the pledged asset is locked.
 - `ActivePledge`: secured-party accepted pledge.
 - `PledgeCloseout`: final release or seizure record.
+- `CollateralBid` (U6 — NEW): private bid in a blind multi-investor auction. signatory: investor, observer: custodian only. Other investors cannot query rival bids.
+- `AuditEvidence` (U7 — NEW): time-bounded regulatory audit disclosure. Non-consuming choice on PledgeCloseout preserves the closeout record.
+- `TokenComplianceCheck` (U9 — NEW): custodian-certified token standard compliance stamp. signatory: custodian, observer: auditor.
 
-Important choices:
+Daml choices:
 
 - `OfferCollateral`
 - `LockByCustodian`
-- `AcceptPledge`
+- `AcceptPledge` (single-leg, backward compatible)
+- `SettleRepo` (NEW — atomic DvP: creates CashTransfer + ActivePledge in one transaction)
 - `ReleaseCollateral`
 - `SeizeCollateral`
+
+Daml Script tests (13 total, all passing):
+
+- `workflowHappyPath` — standard release
+- `workflowDefaultPath` — seizure closeout
+- `workflowPrivacyVisibility` — ExposureTerms hidden from custodian/auditor
+- `workflowWrongPartyRejected` — authorization enforcement
+- `workflowAtomicSettlement` — happy atomic DvP: verifies CashTransfer amount and PledgeTerminal status
+- `workflowAtomicDvpFailure` — insufficient cash: proves zero CashTransfer, zero ActivePledge (impossible on EVM)
+- `workflowPrivacyDvp` — cash leg hidden from custodian/auditor
+- `workflowBlindAuction` (U6 — NEW): 3 investors bid blindly; custodian sees all, investors see only their own, custodian selects winner
+- `workflowAuditEvidence` (U7 — NEW): auditor requests time-bounded evidence via non-consuming choice on PledgeCloseout
+- `workflowTokenCompliance` (U9 — NEW): custodian certifies token standard compliance; auditor sees, investor does not
 
 ## API Routes
 
@@ -139,6 +161,7 @@ GET  /api/workflow/snapshot?party=investor
 POST /api/workflow/bootstrap
 POST /api/workflow/action
 POST /api/workflow/recommend
+POST /api/agent                     ← NEW: AI agent co-pilot
 ```
 
 Supported workflow actions:
@@ -148,29 +171,10 @@ bootstrap
 offer
 lock
 accept
+settle      ← NEW: atomic DvP repo settlement
 release
 default
 ```
-
-`default` exercises the Daml `SeizeCollateral` closeout path.
-
-`bootstrap` accepts an optional scenario:
-
-```json
-{ "scenario": "standard" }
-```
-
-Supported scenarios:
-
-```text
-standard
-default-risk
-undercovered
-```
-
-If `DEMO_ACCESS_KEY` is configured, workflow-changing routes require a valid demo session cookie from `/api/demo/session`.
-
-The app also signs the workflow context into an HttpOnly cookie. That keeps the hackathon preview usable on Vercel serverless functions without adding a database: parties, active ledger offset, scenario, and last action can survive refreshes and function cold starts.
 
 ## Run Locally
 
@@ -188,7 +192,19 @@ dpm build
 dpm test
 ```
 
-Start a Canton sandbox with JSON API:
+### Quick start (both Canton sandbox + web app in one command)
+
+Copy `.env.example` to `.env.local` and fill in any optional keys, then:
+
+```bash
+pnpm dev:full
+```
+
+This builds the Daml archive, starts Canton sandbox on port 7575, waits for it, then starts the Next.js dev server on port 3000.
+
+### Manual start
+
+In one shell, start the Canton sandbox:
 
 ```bash
 cd contracts
@@ -198,7 +214,16 @@ dpm sandbox --json-api-port 7575 --dar .daml/dist/collateralops-0.1.0.dar
 In another shell, start the web app:
 
 ```bash
-CANTON_JSON_API_URL=http://localhost:7575 pnpm dev
+cp .env.example .env.local   # first time only
+pnpm dev
+```
+
+For the AI agent, set the optional `LLM_API_KEY` in `.env.local`:
+
+```text
+LLM_API_KEY=sk-your-dgrid-key
+LLM_BASE_URL=https://api.dgrid.ai
+LLM_MODEL=openai/gpt-4o
 ```
 
 Open:
@@ -207,129 +232,24 @@ Open:
 http://localhost:3000
 ```
 
-If `CANTON_JSON_API_URL` is missing, the app shows a setup error instead of pretending to run.
-
-## Prove The Workflow
-
-Run the normal release path:
-
-```bash
-CANTON_JSON_API_URL=http://localhost:7575 ./scripts/canton-json-proof.sh
-```
-
-Run the default/seizure path:
-
-```bash
-CLOSEOUT_ACTION=default CANTON_JSON_API_URL=http://localhost:7575 ./scripts/canton-json-proof.sh
-```
-
-Run the fallback-collateral scenario:
-
-```bash
-SCENARIO=undercovered CANTON_JSON_API_URL=http://localhost:7575 ./scripts/canton-json-proof.sh
-```
-
-If the live preview is protected:
-
-```bash
-DEMO_ACCESS_KEY=your-key APP_URL=https://your-app.example ./scripts/canton-json-proof.sh
-```
-
-The proof script:
-
-- Checks the Canton JSON API health endpoint.
-- Bootstraps parties and initial contracts.
-- Opens a demo session and preserves the session cookie.
-- Requests an investor-scoped collateral recommendation.
-- Drives offer, lock, accept, and closeout through the app API.
-- Prints party-scoped snapshots for investor, secured party, custodian, and auditor.
-
-## Live Deployment
-
-Recommended hackathon preview deployment:
-
-```text
-Vercel
-  Next.js product UI and API routes
-
-Render
-  Docker service running the Canton sandbox JSON API
-
-GitHub Actions
-  Scheduled keep-awake ping for the Render preview backend
-```
-
-Deployment files:
-
-```text
-Dockerfile.canton
-render.yaml
-render/start-canton.sh
-render/canton-proxy.mjs
-.github/workflows/keep-render-awake.yml
-```
-
-Vercel environment variables:
-
-```bash
-CANTON_JSON_API_URL=https://your-render-service.onrender.com
-DEMO_ACCESS_KEY=your-demo-key
-DEMO_SESSION_SECRET=your-long-random-secret
-CANTON_HEALTH_TIMEOUT_MS=8000
-CANTON_REQUEST_TIMEOUT_MS=25000
-```
-
-GitHub Actions keep-awake secret:
-
-```bash
-RENDER_KEEPALIVE_URL=https://your-render-service.onrender.com
-```
-
-The UI shows a Canton backend warming notice if the Render service is asleep or slow to respond.
-
-Full deployment runbook: [LIVE_PRODUCT_GUIDE.md](./LIVE_PRODUCT_GUIDE.md).
-
 ## Verification
-
-Current verification commands:
 
 ```bash
 pnpm check
 cd contracts && dpm build && dpm test
 ```
 
-The recommendation engine has focused unit coverage in `src/lib/canton-client.test.ts`.
+## Live Deployment
 
-## Product Status
+Same as before — Vercel + Render + keep-awake:
 
-This is a working product prototype with a real Canton JSON API path. It is not a production collateral system yet.
-
-What is real now:
-
-- Daml contract model.
-- Canton sandbox execution.
-- JSON Ledger API submissions.
-- Party-scoped active-contract queries.
-- Deterministic lowest-surplus collateral recommendation with rejected-asset reasons.
-- Private bilateral exposure terms hidden from non-participants.
-- Demo-session isolation and protected mutating routes when `DEMO_ACCESS_KEY` is set.
-- Signed workflow-context cookies for Vercel-safe live previews.
-- Render Docker wrapper and GitHub Actions keep-awake workflow for the Canton preview backend.
-- Release and default closeout paths.
-- Operator-facing UI.
-
-What still needs production hardening:
-
-- Authentication and role-bound sessions.
-- A hosted Canton participant or managed deployment.
-- Durable database for workflow metadata and audit history.
-- Monitoring, logs, and operational runbooks.
-- Real asset/token integration beyond the modeled Treasury position.
-
-## Environment
-
-```bash
-CANTON_JSON_API_URL=http://localhost:7575
-DEMO_ACCESS_KEY=optional-demo-key
-DEMO_SESSION_SECRET=optional-long-random-secret
+```text
+Vercel env:
+  CANTON_JSON_API_URL
+  DEMO_ACCESS_KEY
+  DEMO_SESSION_SECRET
+  LLM_API_KEY             ← NEW: optional, for agentic mode
+  LLM_MODEL               ← NEW: optional, defaults to openai/gpt-4o
 ```
+
+Full deployment guide: [LIVE_PRODUCT_GUIDE.md](./LIVE_PRODUCT_GUIDE.md).

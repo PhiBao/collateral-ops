@@ -197,5 +197,6 @@ function sanitizeWorkflowState(state: WorkflowSessionState | undefined): Workflo
     activeAtOffset: typeof state.activeAtOffset === "number" ? state.activeAtOffset : undefined,
     scenario: state.scenario,
     lastAction: state.lastAction,
+    bootstrapTimestamp: typeof state.bootstrapTimestamp === "number" ? state.bootstrapTimestamp : undefined,
   };
 }

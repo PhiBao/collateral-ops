@@ -28,6 +28,7 @@ const baseSnapshot: WorkflowSnapshot = {
         visibleContractCount: 0,
         visibleTemplateIds: [],
         seesPrivateTerms: false,
+        seesCashLeg: false,
         hiddenSensitiveTemplates: ["ExposureTerms"],
       },
       {
@@ -36,6 +37,7 @@ const baseSnapshot: WorkflowSnapshot = {
         visibleContractCount: 0,
         visibleTemplateIds: [],
         seesPrivateTerms: false,
+        seesCashLeg: false,
         hiddenSensitiveTemplates: ["ExposureTerms"],
       },
       {
@@ -44,6 +46,7 @@ const baseSnapshot: WorkflowSnapshot = {
         visibleContractCount: 0,
         visibleTemplateIds: [],
         seesPrivateTerms: false,
+        seesCashLeg: false,
         hiddenSensitiveTemplates: ["ExposureTerms"],
       },
       {
@@ -52,6 +55,7 @@ const baseSnapshot: WorkflowSnapshot = {
         visibleContractCount: 0,
         visibleTemplateIds: [],
         seesPrivateTerms: false,
+        seesCashLeg: false,
         hiddenSensitiveTemplates: ["ExposureTerms"],
       },
     ],
@@ -59,6 +63,8 @@ const baseSnapshot: WorkflowSnapshot = {
   },
   visibility: {
     TreasuryPosition: false,
+    TokenizedCash: false,
+    CashTransfer: false,
     MarginCall: false,
     ExposureTerms: false,
     CollateralOffer: false,

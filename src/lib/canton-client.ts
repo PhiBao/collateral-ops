@@ -3,6 +3,7 @@ import type {
   ActivePledge,
   AuditReceipt,
   CantonContract,
+  CashTransfer,
   CollateralRecommendation,
   CollateralOffer,
   ExposureTerms,
@@ -12,6 +13,7 @@ import type {
   PartyRole,
   PartyVisibilityProof,
   PledgeCloseout,
+  TokenizedCash,
   TreasuryPosition,
   WorkflowAction,
   WorkflowResult,
@@ -23,11 +25,13 @@ import type {
 
 const roleOrder: PartyRole[] = ["investor", "securedParty", "custodian", "auditor"];
 const partyRoleSchema = z.enum(["investor", "securedParty", "custodian", "auditor"]);
-const workflowScenarioSchema = z.enum(["standard", "default-risk", "undercovered"]);
-const actionSchema = z.enum(["bootstrap", "offer", "lock", "accept", "release", "seize", "default"]);
+const workflowScenarioSchema = z.enum(["standard", "default-risk", "undercovered", "weekend-stress"]);
+const actionSchema = z.enum(["bootstrap", "offer", "lock", "accept", "settle", "release", "seize", "default"]);
 
 const templateIds = {
   TreasuryPosition: "#collateralops:CollateralOps:TreasuryPosition",
+  TokenizedCash: "#collateralops:CollateralOps:TokenizedCash",
+  CashTransfer: "#collateralops:CollateralOps:CashTransfer",
   MarginCall: "#collateralops:CollateralOps:MarginCall",
   ExposureTerms: "#collateralops:CollateralOps:ExposureTerms",
   CollateralOffer: "#collateralops:CollateralOps:CollateralOffer",
@@ -51,6 +55,7 @@ interface WorkflowContext extends WorkflowSessionState {
   scenario?: WorkflowScenario;
   lastAction?: WorkflowAction;
   mutationTimestamps?: number[];
+  bootstrapTimestamp?: number;
 }
 
 type PartyScopedContracts = Record<PartyRole, CantonContract[]>;
@@ -79,6 +84,12 @@ interface TreasurySeed {
   riskNotes: string;
 }
 
+interface CashSeed {
+  amount: number;
+  currency: string;
+  eligible: boolean;
+}
+
 interface ScenarioConfig {
   call: {
     requiredValue: number;
@@ -95,6 +106,7 @@ interface ScenarioConfig {
     sensitiveNote: string;
   };
   positions: TreasurySeed[];
+  cash?: CashSeed;
 }
 
 const scenarioConfigs: Record<WorkflowScenario, ScenarioConfig> = {
@@ -251,6 +263,51 @@ const scenarioConfigs: Record<WorkflowScenario, ScenarioConfig> = {
       },
     ],
   },
+  "weekend-stress": {
+    call: {
+      requiredValue: 5_200_000,
+      reason: "Saturday 02:30 UTC margin call — exposure breach over the weekend",
+      callType: "Weekend repo margin call",
+      counterpartyExposure: 13_100_000,
+      minimumHaircutPct: 2,
+      dueDate: "2026-07-04T02:30:00Z",
+    },
+    terms: {
+      valuationSource: "NorthBank weekend exposure monitor with real-time custodian marks",
+      disputeWindowHours: 1,
+      closeoutThresholdPct: 105,
+      sensitiveNote: "Weekend accelerated resolution — pre-market Monday settlement required. Private to AtlasFund and NorthBank.",
+    },
+    positions: [
+      {
+        cusip: "91282CJC6",
+        issuer: "U.S. Treasury",
+        faceValue: 5_300_000,
+        marketValue: 5_260_000,
+        haircutPct: 2,
+        maturityDate: "2028-01-31",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Primary UST position available for immediate weekend settlement.",
+      },
+      {
+        cusip: "91282CKQ3",
+        issuer: "U.S. Treasury",
+        faceValue: 6_000_000,
+        marketValue: 5_945_000,
+        haircutPct: 2.5,
+        maturityDate: "2029-05-15",
+        liquidityTier: "Tier 1",
+        eligible: true,
+        riskNotes: "Larger buffer position for stress scenarios.",
+      },
+    ],
+    cash: {
+      amount: 6_000_000,
+      currency: "USD",
+      eligible: true,
+    },
+  },
 };
 
 export const partyQuerySchema = z.object({
@@ -282,6 +339,9 @@ export async function getSnapshot(
   const stage = inferStage(mapped);
   const receipts = makeReceipts(mapped, stage, context.lastAction);
   const recommendations = makeRecommendations(mapped.positions, mapped.calls);
+  const settlementSeconds = context.bootstrapTimestamp
+    ? Math.round((Date.now() - context.bootstrapTimestamp) / 1000)
+    : undefined;
 
   return {
     mode: "canton-json-api",
@@ -292,6 +352,8 @@ export async function getSnapshot(
     sessionScoped: sessionId !== "preview-session",
     contracts: [
       ...mapped.positions,
+      ...mapped.cashBalances,
+      ...mapped.cashTransfers,
       ...mapped.calls,
       ...mapped.terms,
       ...mapped.offers,
@@ -302,6 +364,7 @@ export async function getSnapshot(
     ],
     receipts,
     recommendations,
+    settlementSeconds,
     proof: {
       activeAtOffset: context.activeAtOffset ? String(context.activeAtOffset) : undefined,
       visibleContractCount: contracts.length,
@@ -313,6 +376,8 @@ export async function getSnapshot(
     },
     visibility: {
       TreasuryPosition: mapped.positions.length > 0,
+      TokenizedCash: mapped.cashBalances.length > 0,
+      CashTransfer: mapped.cashTransfers.length > 0,
       MarginCall: mapped.calls.length > 0,
       ExposureTerms: mapped.terms.length > 0,
       CollateralOffer: mapped.offers.length > 0,
@@ -339,6 +404,9 @@ export async function runWorkflowAction(
     const scenario = options.scenario ?? "standard";
     const config = scenarioConfigs[scenario];
     const parties = await allocateParties(client);
+    context.bootstrapTimestamp = Date.now();
+    context.scenario = scenario;
+
     const positionResult = await submit(client, {
       userId: "ledger-api-user",
       commandId: commandId("create-positions"),
@@ -364,6 +432,30 @@ export async function runWorkflowAction(
         },
       })),
     });
+
+    let cashResult: { completionOffset: number | string } | undefined;
+    if (config.cash) {
+      cashResult = await submit(client, {
+        userId: "ledger-api-user",
+        commandId: commandId("create-cash"),
+        actAs: [parties.securedParty],
+        readAs: [parties.securedParty, parties.investor],
+        commands: [
+          {
+            CreateCommand: {
+              templateId: templateIds.TokenizedCash,
+              createArguments: {
+                issuer: parties.securedParty,
+                holder: parties.securedParty,
+                amount: decimalString(config.cash.amount),
+                currency: config.cash.currency,
+                eligible: config.cash.eligible,
+              },
+            },
+          },
+        ],
+      });
+    }
 
     const terms = await submit(client, {
       userId: "ledger-api-user",
@@ -415,9 +507,8 @@ export async function runWorkflowAction(
     });
 
     context.parties = parties;
-    context.scenario = scenario;
     context.lastAction = action;
-    context.activeAtOffset = maxOffset(positionResult, terms, call);
+    context.activeAtOffset = maxOffset(positionResult, cashResult, terms, call);
     return ok(action, "call-open", scenario, context.activeAtOffset, "Bootstrapped parties, inventory, private terms, and MarginCall on Canton.");
   }
 
@@ -478,6 +569,24 @@ export async function runWorkflowAction(
     return ok(action, "pledge-active", scenario, context.activeAtOffset, "Secured party accepted the active pledge on Canton.");
   }
 
+  if (action === "settle") {
+    const securedContracts = filterVisibleContracts(await queryActiveContracts(client, parties.securedParty, offset), "securedParty", parties);
+    const locked = requireContract(securedContracts, "LockedCollateral");
+    const cash = requireContract(securedContracts, "TokenizedCash");
+    const result = await submitExercise(client, parties.securedParty, templateIds.LockedCollateral, locked.contractId, "SettleRepo", {
+      cashCid: cash.contractId,
+    });
+    context.activeAtOffset = Number(result.completionOffset);
+    context.lastAction = action;
+    return ok(
+      action,
+      "settled",
+      scenario,
+      context.activeAtOffset,
+      "Atomic settlement completed: cash leg + collateral leg confirmed in one Canton transaction.",
+    );
+  }
+
   if (action === "release" || action === "seize" || action === "default") {
     const securedContracts = filterVisibleContracts(await queryActiveContracts(client, parties.securedParty, offset), "securedParty", parties);
     const pledge = requireContract(securedContracts, "ActivePledge");
@@ -519,6 +628,7 @@ export function getWorkflowSessionState(sessionId: string): WorkflowSessionState
     activeAtOffset: context.activeAtOffset,
     scenario: context.scenario,
     lastAction: context.lastAction,
+    bootstrapTimestamp: context.bootstrapTimestamp,
   };
 }
 
@@ -753,6 +863,12 @@ function isVisibleToRole(contract: CantonContract, role: PartyRole, parties: Par
 
   if (contract.witnessParties?.length) return contract.witnessParties.includes(party);
 
+  if (contract.templateId.includes(":CollateralOps:CashTransfer") || contract.templateId.includes(":CollateralOps:TokenizedCash")) {
+    if (contract.observers?.includes(party)) return true;
+    if (contract.signatories?.includes(party)) return true;
+    return false;
+  }
+
   if (role === "investor") return text(payload.investor) === party;
   if (role === "securedParty") return text(payload.securedParty) === party;
   if (role === "custodian") {
@@ -762,8 +878,8 @@ function isVisibleToRole(contract: CantonContract, role: PartyRole, parties: Par
   return false;
 }
 
-function maxOffset(...responses: { completionOffset: number | string }[]): number {
-  return Math.max(...responses.map((item) => Number(item.completionOffset)));
+function maxOffset(...responses: ({ completionOffset: number | string } | undefined)[]): number {
+  return Math.max(...responses.filter(Boolean).map((item) => Number(item!.completionOffset)));
 }
 
 function ok(
@@ -796,8 +912,24 @@ function requestTimeoutMs() {
   return Number(process.env.CANTON_REQUEST_TIMEOUT_MS ?? 25_000);
 }
 
-function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parties: PartyDirectory) {
+interface MappedContracts {
+  activeParty: PartyRole;
+  parties: PartyDirectory;
+  positions: TreasuryPosition[];
+  cashBalances: TokenizedCash[];
+  cashTransfers: CashTransfer[];
+  calls: MarginCall[];
+  terms: ExposureTerms[];
+  offers: CollateralOffer[];
+  locks: LockedCollateral[];
+  pledges: ActivePledge[];
+  closeouts: PledgeCloseout[];
+}
+
+function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parties: PartyDirectory): MappedContracts {
   const positions: TreasuryPosition[] = [];
+  const cashBalances: TokenizedCash[] = [];
+  const cashTransfers: CashTransfer[] = [];
   const calls: MarginCall[] = [];
   const terms: ExposureTerms[] = [];
   const offers: CollateralOffer[] = [];
@@ -824,6 +956,25 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
         riskNotes: text(contract.payload.riskNotes),
         postHaircutValue: postHaircutValue(decimal(contract.payload.marketValue), decimal(contract.payload.haircutPct)),
         encumbrance: inferEncumbrance(contracts),
+      });
+    } else if (contract.templateId.includes(":CollateralOps:TokenizedCash")) {
+      cashBalances.push({
+        id: contract.contractId,
+        kind: "TokenizedCash",
+        issuer: text(contract.payload.issuer),
+        holder: text(contract.payload.holder),
+        amount: decimal(contract.payload.amount),
+        currency: text(contract.payload.currency),
+        eligible: boolean(contract.payload.eligible),
+      });
+    } else if (contract.templateId.includes(":CollateralOps:CashTransfer")) {
+      cashTransfers.push({
+        id: contract.contractId,
+        kind: "CashTransfer",
+        from: text(contract.payload.from),
+        to: text(contract.payload.to),
+        amount: decimal(contract.payload.amount),
+        currency: text(contract.payload.currency),
       });
     } else if (contract.templateId.includes(":CollateralOps:MarginCall")) {
       calls.push({
@@ -882,6 +1033,12 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
         lockedAt: new Date().toISOString(),
       });
     } else if (contract.templateId.includes(":CollateralOps:ActivePledge")) {
+      const rawStatus = enumText(contract.payload.terminalStatus);
+      let terminalStatus: ActivePledge["terminalStatus"] = "active";
+      if (rawStatus === "Settled") terminalStatus = "settled";
+      else if (rawStatus === "Released") terminalStatus = "released";
+      else if (rawStatus === "Seized") terminalStatus = "seized";
+
       pledges.push({
         id: contract.contractId,
         kind: "ActivePledge",
@@ -895,6 +1052,7 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
         haircutPct: decimal(contract.payload.haircutPct),
         recommendationNote: text(contract.payload.recommendationNote),
         acceptedAt: new Date().toISOString(),
+        terminalStatus,
       });
     } else if (contract.templateId.includes(":CollateralOps:PledgeCloseout")) {
       closeouts.push({
@@ -912,12 +1070,13 @@ function mapContracts(contracts: CantonContract[], activeParty: PartyRole, parti
     }
   }
 
-  return { activeParty, parties, positions, calls, terms, offers, locks, pledges, closeouts };
+  return { activeParty, parties, positions, cashBalances, cashTransfers, calls, terms, offers, locks, pledges, closeouts };
 }
 
-function inferStage(mapped: ReturnType<typeof mapContracts>): WorkflowStage {
+function inferStage(mapped: MappedContracts): WorkflowStage {
   if (mapped.closeouts.some((closeout) => closeout.finalStatus === "seized")) return "seized";
   if (mapped.closeouts.some((closeout) => closeout.finalStatus === "released")) return "released";
+  if (mapped.cashTransfers.length > 0) return "settled";
   if (mapped.pledges.length > 0) return "pledge-active";
   if (mapped.locks.length > 0) return "collateral-locked";
   if (mapped.offers.length > 0) return "offer-posted";
@@ -928,6 +1087,7 @@ function inferStage(mapped: ReturnType<typeof mapContracts>): WorkflowStage {
 function inferEncumbrance(contracts: CantonContract[]): TreasuryPosition["encumbrance"] {
   const closeout = contracts.find((contract) => contract.templateId.includes(":CollateralOps:PledgeCloseout"));
   if (closeout) return enumText(closeout.payload.finalStatus) === "Seized" ? "seized" : "released";
+  if (contracts.some((contract) => contract.templateId.includes(":CollateralOps:CashTransfer"))) return "settled";
   if (contracts.some((contract) => contract.templateId.includes(":CollateralOps:ActivePledge"))) return "pledged";
   if (contracts.some((contract) => contract.templateId.includes(":CollateralOps:LockedCollateral"))) return "locked";
   if (contracts.some((contract) => contract.templateId.includes(":CollateralOps:CollateralOffer"))) return "offered";
@@ -937,13 +1097,14 @@ function inferEncumbrance(contracts: CantonContract[]): TreasuryPosition["encumb
 function nextActions(stage: WorkflowStage): WorkflowAction[] {
   if (stage === "call-open") return ["offer"];
   if (stage === "offer-posted") return ["lock"];
-  if (stage === "collateral-locked") return ["accept"];
+  if (stage === "collateral-locked") return ["accept", "settle"];
   if (stage === "pledge-active") return ["release", "default"];
+  if (stage === "settled") return ["release", "default"];
   return ["bootstrap"];
 }
 
 function makeReceipts(
-  mapped: ReturnType<typeof mapContracts>,
+  mapped: MappedContracts,
   stage: WorkflowStage,
   lastAction: WorkflowAction | undefined,
 ): AuditReceipt[] {
@@ -955,7 +1116,8 @@ function makeReceipts(
   if (mapped.terms.length > 0) receipts.push(receipt("bootstrap", "securedParty", timestamp, "Private exposure terms were disclosed only to AtlasFund and NorthBank."));
   if (mapped.offers.length > 0) receipts.push(receipt("offer", "investor", timestamp, "AtlasFund offered tokenized UST collateral."));
   if (mapped.locks.length > 0) receipts.push(receipt("lock", "custodian", timestamp, "ClearVault locked the pledged position."));
-  if (mapped.pledges.length > 0 || stage === "pledge-active") receipts.push(receipt("accept", "securedParty", timestamp, "NorthBank accepted the active pledge."));
+  if (mapped.cashTransfers.length > 0) receipts.push(receipt("settle", "securedParty", timestamp, "Atomic repo settlement: cash + collateral confirmed in one Canton transaction."));
+  if ((mapped.pledges.length > 0 || stage === "pledge-active") && !mapped.cashTransfers.length) receipts.push(receipt("accept", "securedParty", timestamp, "NorthBank accepted the active pledge."));
   if (stage === "released") receipts.push(receipt("release", "securedParty", timestamp, "NorthBank released the collateral on Canton."));
   if (stage === "seized") receipts.push(receipt("default", "securedParty", timestamp, "NorthBank seized the collateral on Canton."));
   return receipts.map((item) => ({ ...item, updateId: lastAction }));
@@ -979,6 +1141,13 @@ function makePartyVisibilityProof(scopedContracts: PartyScopedContracts, parties
     const contracts = scopedContracts[role] ?? [];
     const visibleTemplateIds = [...new Set(contracts.map((contract) => contract.templateId))];
     const seesPrivateTerms = visibleTemplateIds.some((templateId) => templateId.includes(":CollateralOps:ExposureTerms"));
+    const seesCashLeg = visibleTemplateIds.some((templateId) =>
+      templateId.includes(":CollateralOps:CashTransfer") || templateId.includes(":CollateralOps:TokenizedCash"),
+    );
+
+    const hiddenTemplates: string[] = [];
+    if (!seesPrivateTerms) hiddenTemplates.push("ExposureTerms");
+    if (!seesCashLeg) hiddenTemplates.push("CashTransfer", "TokenizedCash");
 
     return {
       role,
@@ -986,7 +1155,8 @@ function makePartyVisibilityProof(scopedContracts: PartyScopedContracts, parties
       visibleContractCount: contracts.length,
       visibleTemplateIds,
       seesPrivateTerms,
-      hiddenSensitiveTemplates: seesPrivateTerms ? [] : ["ExposureTerms"],
+      seesCashLeg,
+      hiddenSensitiveTemplates: hiddenTemplates,
     };
   });
 }
