@@ -237,54 +237,5 @@ cd contracts && dpm build && dpm test
 
 ## Live Deployment
 
-Canton sandbox needs 1GB+ RAM — Render's free 512MB plan doesn't fit. The recommended approach: **run Canton on a local/self-hosted machine, tunnel it, and deploy the UI to Vercel.**
-
-### 1. Deploy UI to Vercel
-
-Create a Vercel project from this repo. Set env vars:
-
-```text
-CANTON_JSON_API_URL=https://your-tunnel-url   ← point at your tunnel (see step 3)
-DEMO_ACCESS_KEY=demo
-DEMO_SESSION_SECRET=your-long-random-secret
-LLM_API_KEY=sk-your-dgrid-key                  ← optional, for agentic mode
-LLM_MODEL=openai/gpt-4o
-```
-
-### 2. Start Canton sandbox on your machine
-
-```bash
-pnpm dev:canton
-# or manually:
-cd contracts && dpm build && dpm sandbox --json-api-port 7575 --dar .daml/dist/collateralops-0.1.0.dar
-```
-
-### 3. Create a tunnel (pick one)
-
-**Cloudflare Tunnel** (free, no install needed if you use `cloudflared`):
-```bash
-cloudflared tunnel --url http://localhost:7575
-# → https://your-tunnel.trycloudflare.com
-```
-
-**ngrok** (free, requires account):
-```bash
-ngrok http 7575
-# → https://xxxx.ngrok.io
-```
-
-### 4. Update Vercel env
-
-Set `CANTON_JSON_API_URL` to your tunnel URL from step 3 and redeploy.
-
-Your live product URL: `https://YOUR-APP.vercel.app`
-
-### Alternative: render/start-tunnel.sh
-
-A convenience script that boots Canton locally:
-
-```bash
-./render/start-tunnel.sh
-```
-
+The recommended free approach: **run Canton on a local/self-hosted machine, tunnel it, and deploy the UI to Vercel.**
 Full deployment guide: [LIVE_PRODUCT_GUIDE.md](./LIVE_PRODUCT_GUIDE.md).
