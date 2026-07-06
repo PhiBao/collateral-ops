@@ -8,7 +8,9 @@ log/
 .env
 .env.local
 .env.*.local
-contracts/.daml/
+contracts/.daml/**
+!contracts/.daml/dist/
 contracts/log/
 *.dar
+!contracts/.daml/dist/collateralops-0.1.0.dar
 .DS_Store

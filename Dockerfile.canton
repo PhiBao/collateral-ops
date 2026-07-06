@@ -1,21 +1,39 @@
 FROM node:22-bookworm-slim
 
-ARG DAML_SDK_VERSION=3.5.1
+ARG DAML_VERSION=3.4.11
+ARG JAVA_VERSION=21
 
 RUN apt-get update \
-  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl openjdk-17-jre-headless tar tzdata \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl tar tzdata jq \
   && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/root/.dpm/bin:/root/.daml/bin:${PATH}"
+RUN JDK_URL="https://api.adoptium.net/v3/binary/latest/${JAVA_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse" \
+  && echo "Downloading JDK ${JAVA_VERSION}" \
+  && curl -fsSL -o /tmp/jdk.tar.gz "${JDK_URL}" \
+  && mkdir -p /opt/java \
+  && tar xzf /tmp/jdk.tar.gz -C /opt/java --strip-components 1 \
+  && rm /tmp/jdk.tar.gz \
+  && ls /opt/java/bin/
+
+ENV JAVA_HOME=/opt/java \
+  PATH="/opt/java/bin:${PATH}" \
+  CANTON_HOME=/app/canton
+
+RUN java -version
+
 WORKDIR /app
 
 COPY contracts ./contracts
 COPY render ./render
+RUN chmod +x ./render/start-canton.sh
 
-RUN curl -fsSL https://get.daml.com/ | sh -s "${DAML_SDK_VERSION}" \
-  && chmod +x ./render/start-canton.sh \
-  && cd contracts \
-  && if command -v dpm >/dev/null 2>&1; then dpm build; else daml build; fi
+RUN CANTON_URL="https://github.com/digital-asset/daml/releases/download/v${DAML_VERSION}/canton-open-source-${DAML_VERSION}.tar.gz" \
+  && echo "Downloading ${CANTON_URL}" \
+  && curl -fsSL -o /tmp/canton.tar.gz "${CANTON_URL}" \
+  && mkdir -p /app/canton \
+  && tar xzf /tmp/canton.tar.gz -C /app/canton --strip-components 1 \
+  && rm /tmp/canton.tar.gz \
+  && echo "Canton bin:" && ls -la /app/canton/bin/canton
 
 EXPOSE 10000
 
