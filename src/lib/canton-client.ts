@@ -386,7 +386,7 @@ export async function getSnapshot(
       PledgeCloseout: mapped.closeouts.length > 0,
       AuditReceipt: receipts.length > 0,
     },
-    nextActions: bootstrapped ? nextActions(stage) : ["bootstrap"],
+    nextActions: bootstrapped ? nextActions(stage, mapped.cashBalances.length > 0) : ["bootstrap"],
     updatedAt: new Date().toISOString(),
     updateId: context.activeAtOffset ? String(context.activeAtOffset) : undefined,
   };
@@ -1094,12 +1094,11 @@ function inferEncumbrance(contracts: CantonContract[]): TreasuryPosition["encumb
   return "free";
 }
 
-function nextActions(stage: WorkflowStage): WorkflowAction[] {
+function nextActions(stage: WorkflowStage, hasCash = false): WorkflowAction[] {
   if (stage === "call-open") return ["offer"];
   if (stage === "offer-posted") return ["lock"];
-  if (stage === "collateral-locked") return ["accept", "settle"];
-  if (stage === "pledge-active") return ["release", "default"];
-  if (stage === "settled") return ["release", "default"];
+  if (stage === "collateral-locked") return hasCash ? ["accept", "settle"] : ["accept"];
+  if (stage === "pledge-active" || stage === "settled") return ["release", "default"];
   return ["bootstrap"];
 }
 
