@@ -612,6 +612,11 @@ summary:focus-visible {
 .action-error {
   background: var(--danger-soft);
   border-color: rgb(180 35 24 / 0.24);
+  max-height: 180px;
+  overflow: auto;
+  word-break: break-all;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--danger);
   font-weight: 750;
   line-height: 1.45;

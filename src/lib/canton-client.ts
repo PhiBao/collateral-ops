@@ -588,8 +588,15 @@ export async function runWorkflowAction(
   }
 
   if (action === "release" || action === "seize" || action === "default") {
-    const securedContracts = filterVisibleContracts(await queryActiveContracts(client, parties.securedParty, offset), "securedParty", parties);
-    const pledge = requireContract(securedContracts, "ActivePledge");
+    let securedContracts = filterVisibleContracts(await queryActiveContracts(client, parties.securedParty, offset), "securedParty", parties);
+    let pledge = findContract(securedContracts, "ActivePledge");
+    if (!pledge) {
+      const allContracts = await queryActiveContracts(client, parties.securedParty, offset);
+      pledge = findContract(allContracts, "ActivePledge");
+    }
+    if (!pledge) {
+      throw new Error("No ActivePledge found — the pledge may already be closed. Reset and try again.");
+    }
     const closeoutAction = action === "release" ? "ReleaseCollateral" : "SeizeCollateral";
     const result = await submitExercise(
       client,
@@ -800,7 +807,8 @@ async function postJson(client: { baseUrl: string }, path: string, body: Record<
   const json = text ? JSON.parse(text) : {};
 
   if (!response.ok) {
-    throw new Error(`${path} failed (${response.status}): ${text}`);
+    const short = text.length > 500 ? text.slice(0, 500) + "..." : text;
+    throw new Error(`${path} failed (${response.status}): ${short}`);
   }
 
   return json;
@@ -832,6 +840,10 @@ function requireOffset(context: { activeAtOffset?: number }): number {
     throw new Error("Run bootstrap first so the app has a Canton ledger offset.");
   }
   return context.activeAtOffset;
+}
+
+function findContract(contracts: CantonContract[], kind: keyof typeof templateIds): CantonContract | undefined {
+  return contracts.find((item) => item.templateId.includes(`:CollateralOps:${kind}`));
 }
 
 function requireContract(contracts: CantonContract[], kind: keyof typeof templateIds): CantonContract {
