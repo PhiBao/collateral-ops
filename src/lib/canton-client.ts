@@ -329,9 +329,19 @@ export async function getSnapshot(
   const parties = context.parties ?? partyHints;
   const scenario = context.scenario ?? "standard";
   const bootstrapped = Boolean(context.activeAtOffset && context.parties);
-  const scopedContracts = bootstrapped
-    ? await queryPartyScopedContracts(client, parties as PartyDirectory, context.activeAtOffset!)
-    : emptyScopedContracts();
+  let scopedContracts: PartyScopedContracts;
+  if (bootstrapped) {
+    try {
+      scopedContracts = await queryPartyScopedContracts(client, parties as PartyDirectory, context.activeAtOffset!);
+    } catch {
+      context.activeAtOffset = undefined;
+      context.parties = undefined;
+      context.bootstrapTimestamp = undefined;
+      scopedContracts = emptyScopedContracts();
+    }
+  } else {
+    scopedContracts = emptyScopedContracts();
+  }
   const rawContracts = scopedContracts[activeParty];
   const contracts = filterVisibleContracts(rawContracts, activeParty, parties as PartyDirectory);
 
