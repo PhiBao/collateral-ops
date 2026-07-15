@@ -22,23 +22,30 @@ import type {
   WorkflowSnapshot,
   WorkflowStage,
 } from "./types";
+import { devnetBaseUrl, getDevnetToken } from "./devnet-auth";
 
 const roleOrder: PartyRole[] = ["investor", "securedParty", "custodian", "auditor"];
 const partyRoleSchema = z.enum(["investor", "securedParty", "custodian", "auditor"]);
 const workflowScenarioSchema = z.enum(["standard", "default-risk", "undercovered", "weekend-stress"]);
 const actionSchema = z.enum(["bootstrap", "offer", "lock", "accept", "settle", "release", "seize", "default"]);
 
-const templateIds = {
-  TreasuryPosition: "#collateralops:CollateralOps:TreasuryPosition",
-  TokenizedCash: "#collateralops:CollateralOps:TokenizedCash",
-  CashTransfer: "#collateralops:CollateralOps:CashTransfer",
-  MarginCall: "#collateralops:CollateralOps:MarginCall",
-  ExposureTerms: "#collateralops:CollateralOps:ExposureTerms",
-  CollateralOffer: "#collateralops:CollateralOps:CollateralOffer",
-  LockedCollateral: "#collateralops:CollateralOps:LockedCollateral",
-  ActivePledge: "#collateralops:CollateralOps:ActivePledge",
-  PledgeCloseout: "#collateralops:CollateralOps:PledgeCloseout",
-} as const;
+function getTemplateIds() {
+  const pkg = process.env.CANTON_PACKAGE_ID ?? "e5d29b130e828b7e8b595ea6d9aa32ab1ec420585ad0fc1b83d9884df5e76f3d";
+  const prefix = `${pkg}:CollateralOps:`;
+  return {
+    TreasuryPosition: `${prefix}TreasuryPosition`,
+    TokenizedCash: `${prefix}TokenizedCash`,
+    CashTransfer: `${prefix}CashTransfer`,
+    MarginCall: `${prefix}MarginCall`,
+    ExposureTerms: `${prefix}ExposureTerms`,
+    CollateralOffer: `${prefix}CollateralOffer`,
+    LockedCollateral: `${prefix}LockedCollateral`,
+    ActivePledge: `${prefix}ActivePledge`,
+    PledgeCloseout: `${prefix}PledgeCloseout`,
+  } as const;
+}
+
+const templateIds = getTemplateIds();
 
 const partyHints = {
   investor: "AtlasFund",
@@ -668,11 +675,7 @@ export async function checkCantonHealth() {
 }
 
 function cantonClient() {
-  const baseUrl = process.env.CANTON_JSON_API_URL?.replace(/\/$/, "");
-  if (!baseUrl) {
-    throw new Error("CANTON_JSON_API_URL is required. Start Canton with JSON API and set CANTON_JSON_API_URL=http://localhost:7575.");
-  }
-  return { baseUrl };
+  return { baseUrl: devnetBaseUrl(), devnet: true };
 }
 
 function getContext(sessionId: string, persistedContext?: WorkflowSessionState): WorkflowContext {
@@ -800,12 +803,18 @@ async function queryActiveContracts(client: { baseUrl: string }, party: string, 
     }));
 }
 
-async function postJson(client: { baseUrl: string }, path: string, body: Record<string, unknown>) {
+async function postJson(client: { baseUrl: string; devnet?: boolean }, path: string, body: Record<string, unknown>) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (client.devnet) {
+    const token = await getDevnetToken();
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   const response = await fetchWithTimeout(
     `${client.baseUrl}${path}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body),
       cache: "no-store",
     },
@@ -931,7 +940,7 @@ function healthTimeoutMs() {
 }
 
 function requestTimeoutMs() {
-  return Number(process.env.CANTON_REQUEST_TIMEOUT_MS ?? 25_000);
+  return Number(process.env.CANTON_REQUEST_TIMEOUT_MS ?? 45_000);
 }
 
 interface MappedContracts {
